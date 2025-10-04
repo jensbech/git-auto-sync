@@ -150,6 +150,62 @@ func main() {
 						Usage:  "Set an environment variable",
 						Action: daemonEnv,
 					},
+					{
+						Name:  "enable",
+						Usage: "Install and start the launch agent (auto start at login)",
+						Action: func(c *cli.Context) error {
+							srv, err := common.NewService()
+							if err != nil {
+								return tracerr.Wrap(err)
+							}
+							return tracerr.Wrap(srv.Enable())
+						},
+					},
+					{
+						Name:  "disable",
+						Usage: "Stop and uninstall the launch agent",
+						Action: func(c *cli.Context) error {
+							srv, err := common.NewService()
+							if err != nil {
+								return tracerr.Wrap(err)
+							}
+							return tracerr.Wrap(srv.Disable())
+						},
+					},
+					{
+						Name:  "start",
+						Usage: "Start the daemon if installed",
+						Action: func(c *cli.Context) error {
+							srv, err := common.NewService()
+							if err != nil {
+								return tracerr.Wrap(err)
+							}
+							return tracerr.Wrap(srv.Service.Start())
+						},
+					},
+					{
+						Name:  "stop",
+						Usage: "Stop the daemon if running (keeps installed)",
+						Action: func(c *cli.Context) error {
+							srv, err := common.NewService()
+							if err != nil {
+								return tracerr.Wrap(err)
+							}
+							return tracerr.Wrap(srv.Service.Stop())
+						},
+					},
+					{
+						Name:  "restart",
+						Usage: "Restart the daemon if running",
+						Action: func(c *cli.Context) error {
+							srv, err := common.NewService()
+							if err != nil {
+								return tracerr.Wrap(err)
+							}
+							_ = srv.Service.Stop()
+							return tracerr.Wrap(srv.Service.Start())
+						},
+					},
 				},
 			},
 		},

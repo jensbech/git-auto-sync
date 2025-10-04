@@ -70,11 +70,11 @@ func NewRepoConfig(repoPath string) (RepoConfig, error) {
 
 func WatchForChanges(cfg RepoConfig) error {
 	repoPath := cfg.RepoPath
-	var err error
+	log.Printf("watch: starting for repo=%s", repoPath)
 
-	err = AutoSync(cfg)
-	if err != nil {
-		return tracerr.Wrap(err)
+	if err := AutoSync(cfg); err != nil {
+		// Don't abort watcher startup; just log the error so daemon continues.
+		log.Printf("watch: initial autosync error repo=%s err=%v", repoPath, err)
 	}
 
 	notifyFilteredChannel := make(chan bool, 100)
@@ -84,35 +84,37 @@ func WatchForChanges(cfg RepoConfig) error {
 	go func() {
 		notifier, err := NewAwakeNotifier()
 		if err != nil {
-			log.Fatalln(err)
+			log.Printf("awake: init error repo=%s err=%v", repoPath, err)
+		} else {
+			if err := notifier.Start(notifyFilteredChannel); err != nil {
+				log.Printf("awake: start error repo=%s err=%v", repoPath, err)
+			}
 		}
 
-		err = notifier.Start(notifyFilteredChannel)
-		if err != nil {
-			log.Fatalln(err)
-		}
+		backoff := 1 * time.Second
+		maxBackoff := 60 * time.Second
 
 		for {
 			select {
 			case <-notifyFilteredChannel:
-				// Wait 1 second
-				timer1 := time.NewTimer(cfg.FSLag)
-				done := make(chan bool)
-				go func() {
-					<-timer1.C
-					done <- true
-				}()
-
-				err := AutoSync(cfg)
-				if err != nil {
-					log.Fatalln(err)
+				// Coalesce events
+				time.Sleep(cfg.FSLag)
+				if err := AutoSync(cfg); err != nil {
+					log.Printf("autosync: fs-event failed repo=%s err=%v", repoPath, err)
+					time.Sleep(backoff)
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+				} else {
+					log.Printf("autosync: fs-event success repo=%s backoff-reset", repoPath)
+					backoff = 1 * time.Second
 				}
-				continue
-
 			case <-pollTicker.C:
-				err := AutoSync(cfg)
-				if err != nil {
-					log.Fatalln(err)
+				if err := AutoSync(cfg); err != nil {
+					log.Printf("autosync: poll failed repo=%s err=%v", repoPath, err)
+				} else {
+					log.Printf("autosync: poll success repo=%s", repoPath)
 				}
 			}
 		}
@@ -123,7 +125,7 @@ func WatchForChanges(cfg RepoConfig) error {
 	//
 	notifyChannel := make(chan notify.EventInfo, 100)
 
-	err = notify.Watch(filepath.Join(repoPath, "..."), notifyChannel, notify.Write, notify.Rename, notify.Remove, notify.Create)
+	err := notify.Watch(filepath.Join(repoPath, "..."), notifyChannel, notify.Write, notify.Rename, notify.Remove, notify.Create)
 	if err != nil {
 		return tracerr.Wrap(err)
 	}
@@ -131,14 +133,22 @@ func WatchForChanges(cfg RepoConfig) error {
 
 	for {
 		ei := <-notifyChannel
-		ignore, err := ShouldIgnoreFile(repoPath, ei.Path())
+		path := ei.Path()
+		ignore, err := ShouldIgnoreFile(repoPath, path)
 		if err != nil {
-			return tracerr.Wrap(err)
+			log.Printf("watch: ignore-check error repo=%s path=%s err=%v", repoPath, path, err)
+			continue
 		}
 		if ignore {
 			continue
 		}
 
-		notifyFilteredChannel <- true
+		log.Printf("watch: event repo=%s op=%v path=%s", repoPath, ei.Event(), path)
+		select {
+		case notifyFilteredChannel <- true:
+		default:
+			// Channel full; drop event but log it.
+			log.Printf("watch: filtered-channel-full repo=%s path=%s", repoPath, path)
+		}
 	}
 }

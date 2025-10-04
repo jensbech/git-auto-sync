@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,7 +41,7 @@ func commit(repoConfig RepoConfig) error {
     }
 
     // Filter ignored files (respect existing ShouldIgnoreFile logic)
-    lines := []string{}
+	lines := []string{}
     for _, line := range strings.Split(raw, "\n") {
         parts := strings.Fields(line)
         if len(parts) < 2 { // malformed line, keep it
@@ -65,10 +66,11 @@ func commit(repoConfig RepoConfig) error {
         return nil
     }
 
-    msg := strings.Join(lines, "\n")
-    if _, err := GitCommand(repoConfig, []string{"commit", "-m", msg}); err != nil {
-        return tracerr.Wrap(err)
-    }
+	msg := strings.Join(lines, "\n")
+	if _, err := GitCommand(repoConfig, []string{"commit", "-m", msg}); err != nil {
+		return tracerr.Wrap(err)
+	}
+	log.Printf("git-auto-sync: committed %d file(s) repo=%s\n%s", len(lines), repoPath, msg)
     return nil
 }
 
