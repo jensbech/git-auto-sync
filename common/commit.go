@@ -86,6 +86,12 @@ func GitCommand(repoConfig RepoConfig, args []string) (bytes.Buffer, error) {
 		cmd = repoConfig.GitExec
 	}
 
+	// For GitHub repositories, ensure we use GitHub CLI for authentication
+	if isGitHubRepo(repoPath) {
+		// Add GitHub CLI credential helper to the command
+		args = append([]string{"-c", "credential.https://github.com.helper=!gh auth git-credential"}, args...)
+	}
+
 	statusCmd := exec.Command(cmd, args...)
 	statusCmd.Dir = repoPath
 	statusCmd.Stdout = &outb
@@ -149,4 +155,15 @@ func repoUsesSSH(repoPath string) bool {
 	}
 	remoteURL := strings.TrimSpace(string(output))
 	return strings.HasPrefix(remoteURL, "git@") || strings.HasPrefix(remoteURL, "ssh://")
+}
+
+func isGitHubRepo(repoPath string) bool {
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd.Dir = repoPath
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	remoteURL := strings.TrimSpace(string(output))
+	return strings.Contains(remoteURL, "github.com")
 }
