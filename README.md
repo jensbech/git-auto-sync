@@ -2,7 +2,7 @@
 
 ## Why fork?
 - Did not work on newest macos apparently.
-- Use `gh` and https instead of ssh
+- Use `gh` and https instead of ssh.
 - Be a bit forceful on git locks and such.
 
 GitAutoSync is a simple command line program to automatically commit changes
