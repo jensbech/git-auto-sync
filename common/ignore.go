@@ -30,13 +30,13 @@ func ShouldIgnoreFile(repoPath string, filePath string) (bool, error) {
 		return true, nil
 	}
 
-	empty, err := isEmptyFile(filePath)
+	_, err := isEmptyFile(filePath) // We still check existence errors but allow empty files
 	if err != nil {
 		return false, tracerr.Wrap(err)
 	}
-	if empty {
-		return true, nil
-	}
+	// Previously empty files were ignored to avoid committing editor temp placeholders.
+	// We now allow empty files so that newly created placeholder scripts/configs are synced.
+	// If a user wants to exclude them they should rely on .gitignore patterns instead.
 
 	return isFileIgnoredByGit(repoPath, filePath)
 }
