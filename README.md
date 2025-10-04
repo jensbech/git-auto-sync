@@ -3,6 +3,7 @@
 ## Why fork?
 - Did not work on newest macos apparently.
 - Use `gh` and https instead of ssh
+- Be a bit forceful on git locks and such.
 
 GitAutoSync is a simple command line program to automatically commit changes
 to your git repo, and always keep that repo up to date. This way you can use any editor with your text files, and never need to worry about
