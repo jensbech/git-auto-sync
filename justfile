@@ -32,24 +32,3 @@ clean:
 
 help:
     @just --list
-
-# Rename default branch from master to main (idempotent)
-rename-branch:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    current_branch="$(git symbolic-ref --short HEAD)"
-    if [ "$current_branch" = "master" ]; then
-        echo "Renaming local branch master -> main"
-        git branch -m master main
-    fi
-    if git show-ref --verify --quiet refs/heads/main; then
-        echo "Pushing main (setting upstream)"
-        git push -u origin main || true
-    fi
-    echo "Setting GitHub default branch to main (requires gh CLI auth)"
-    if command -v gh >/dev/null 2>&1; then
-        gh repo edit --default-branch main || true
-    else
-        echo "gh CLI not installed; skip remote default branch change"
-    fi
-    echo "Done. Update any open PR base branches manually if needed."
