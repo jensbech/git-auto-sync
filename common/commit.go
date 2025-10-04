@@ -93,8 +93,12 @@ func GitCommand(repoConfig RepoConfig, args []string) (bytes.Buffer, error) {
 	statusCmd.Env = toEnvString(repoConfig)
 	err := statusCmd.Run()
 
+	// Only warn about SSH_AUTH_SOCK if the repo is using SSH URLs
 	if hasEnvVariable(os.Environ(), "SSH_AUTH_SOCK") && !hasEnvVariable(repoConfig.Env, "SSH_AUTH_SOCK") {
-		fmt.Println("WARNING: SSH_AUTH_SOCK env variable isn't being passed")
+		// Check if repo is using SSH URLs (git@ prefix)
+		if repoUsesSSH(repoConfig.RepoPath) {
+			fmt.Println("WARNING: SSH_AUTH_SOCK env variable isn't being passed")
+		}
 	}
 
 	if err != nil {
@@ -109,11 +113,16 @@ func toEnvString(repoConfig RepoConfig) []string {
 	vals := repoConfig.Env
 	vals = append(vals, repoConfig.Env...)
 
+	// Include essential environment variables for Git operations
+	essentialVars := []string{"HOME", "PATH", "USER", "LOGNAME"}
 	for _, s := range os.Environ() {
 		parts := strings.Split(s, "=")
 		k := parts[0]
-		if k == "HOME" {
-			vals = append(vals, s)
+		for _, essential := range essentialVars {
+			if k == essential {
+				vals = append(vals, s)
+				break
+			}
 		}
 	}
 
@@ -129,4 +138,15 @@ func hasEnvVariable(all []string, name string) bool {
 		}
 	}
 	return false
+}
+
+func repoUsesSSH(repoPath string) bool {
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd.Dir = repoPath
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	remoteURL := strings.TrimSpace(string(output))
+	return strings.HasPrefix(remoteURL, "git@") || strings.HasPrefix(remoteURL, "ssh://")
 }
