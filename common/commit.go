@@ -2,83 +2,78 @@ package common
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"sort"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ztrue/tracerr"
-	git "gopkg.in/src-d/go-git.v4"
 )
 
 func commit(repoConfig RepoConfig) error {
-	repoPath := repoConfig.RepoPath
-	repo, err := git.PlainOpenWithOptions(repoPath, &git.PlainOpenOptions{DetectDotGit: true})
-	if err != nil {
-		return tracerr.Wrap(err)
-	}
+    repoPath := repoConfig.RepoPath
 
-	w, err := repo.Worktree()
-	if err != nil {
-		return tracerr.Wrap(err)
-	}
+    // Stage everything (adds, mods, deletions, renames)
+    if _, err := GitCommand(repoConfig, []string{"add", "-A"}); err != nil {
+        return tracerr.Wrap(err)
+    }
 
-	status, err := w.Status()
-	if err != nil {
-		return tracerr.Wrap(err)
-	}
+    // Check if anything is staged; if not, exit early
+    // 'git diff --cached --quiet' exits 1 when there are differences
+    _, err := GitCommand(repoConfig, []string{"diff", "--cached", "--quiet"})
+    if err == nil {
+        // Exit status 0 => no staged changes
+        return nil
+    }
 
-	hasChanges := false
-	commitMsg := []string{}
-	for filePath, fileStatus := range status {
-		if fileStatus.Worktree == git.Unmodified && fileStatus.Staging == git.Unmodified {
-			continue
-		}
+    // Collect staged file list for commit message
+    out, err := GitCommand(repoConfig, []string{"diff", "--cached", "--name-status"})
+    if err != nil {
+        return tracerr.Wrap(err)
+    }
+    raw := strings.TrimSpace(out.String())
+    if raw == "" { // defensive
+        return nil
+    }
 
-		ignore, err := ShouldIgnoreFile(repoPath, filePath)
-		if err != nil {
-			return tracerr.Wrap(err)
-		}
+    // Filter ignored files (respect existing ShouldIgnoreFile logic)
+    lines := []string{}
+    for _, line := range strings.Split(raw, "\n") {
+        parts := strings.Fields(line)
+        if len(parts) < 2 { // malformed line, keep it
+            lines = append(lines, line)
+            continue
+        }
+        statusCode := parts[0]
+        filePath := parts[len(parts)-1] // In rename lines last token is new path
+        ignore, igErr := ShouldIgnoreFile(repoPath, filePath)
+        if igErr != nil {
+            return tracerr.Wrap(igErr)
+        }
+        if ignore {
+            continue
+        }
+        lines = append(lines, statusCode+" "+filePath)
+    }
 
-		if ignore {
-			continue
-		}
+    if len(lines) == 0 {
+        // All staged files ignored => unstage them to avoid future confusion
+        _, _ = GitCommand(repoConfig, []string{"reset"})
+        return nil
+    }
 
-		hasChanges = true
-		_, err = w.Add(filePath)
-		if err != nil {
-			return tracerr.Wrap(err)
-		}
-
-		msg := ""
-		if fileStatus.Worktree == git.Untracked && fileStatus.Staging == git.Untracked {
-			msg += "?? "
-		} else {
-			msg += " " + string(fileStatus.Worktree) + " "
-		}
-		msg += filePath
-		commitMsg = append(commitMsg, msg)
-	}
-
-	sort.Strings(commitMsg)
-	msg := strings.Join(commitMsg, "\n")
-
-	if !hasChanges {
-		return nil
-	}
-
-	_, err = GitCommand(repoConfig, []string{"commit", "-m", msg})
-	if err != nil {
-		return tracerr.Wrap(err)
-	}
-
-	return nil
+    msg := strings.Join(lines, "\n")
+    if _, err := GitCommand(repoConfig, []string{"commit", "-m", msg}); err != nil {
+        return tracerr.Wrap(err)
+    }
+    return nil
 }
 
 func GitCommand(repoConfig RepoConfig, args []string) (bytes.Buffer, error) {
 	repoPath := repoConfig.RepoPath
-
 	var outb, errb bytes.Buffer
 
 	cmd := "git"
@@ -86,33 +81,63 @@ func GitCommand(repoConfig RepoConfig, args []string) (bytes.Buffer, error) {
 		cmd = repoConfig.GitExec
 	}
 
-	// For GitHub repositories, ensure we use GitHub CLI for authentication
 	if isGitHubRepo(repoPath) {
-		// Add GitHub CLI credential helper to the command
 		args = append([]string{"-c", "credential.https://github.com.helper=!gh auth git-credential"}, args...)
 	}
 
-	statusCmd := exec.Command(cmd, args...)
-	statusCmd.Dir = repoPath
-	statusCmd.Stdout = &outb
-	statusCmd.Stderr = &errb
-	statusCmd.Env = toEnvString(repoConfig)
-	err := statusCmd.Run()
+	lockPath := filepath.Join(repoPath, ".git", "index.lock")
+	maxAttempts := 5
+	backoff := 120 * time.Millisecond
 
-	// Only warn about SSH_AUTH_SOCK if the repo is using SSH URLs
-	if hasEnvVariable(os.Environ(), "SSH_AUTH_SOCK") && !hasEnvVariable(repoConfig.Env, "SSH_AUTH_SOCK") {
-		// Check if repo is using SSH URLs (git@ prefix)
-		if repoUsesSSH(repoConfig.RepoPath) {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		outb.Reset()
+		errb.Reset()
+
+		statusCmd := exec.Command(cmd, args...)
+		statusCmd.Dir = repoPath
+		statusCmd.Stdout = &outb
+		statusCmd.Stderr = &errb
+		statusCmd.Env = toEnvString(repoConfig)
+		runErr := statusCmd.Run()
+
+		if hasEnvVariable(os.Environ(), "SSH_AUTH_SOCK") && !hasEnvVariable(repoConfig.Env, "SSH_AUTH_SOCK") && repoUsesSSH(repoConfig.RepoPath) {
 			fmt.Println("WARNING: SSH_AUTH_SOCK env variable isn't being passed")
 		}
-	}
 
-	if err != nil {
+		if runErr == nil {
+			return outb, nil
+		}
+
+		stderr := errb.String()
+		// index.lock contention detection
+		if strings.Contains(stderr, "index.lock") && strings.Contains(stderr, "Unable to create") {
+			// Determine staleness
+			info, statErr := os.Stat(lockPath)
+			stale := false
+			if statErr == nil {
+				if time.Since(info.ModTime()) > 4*time.Second {
+					stale = true
+				}
+			} else if errors.Is(statErr, os.ErrNotExist) {
+				// vanished between attempts, just retry
+			}
+
+			if stale {
+				_ = os.Remove(lockPath) // attempt force removal
+			}
+
+			if attempt < maxAttempts {
+				time.Sleep(backoff)
+				backoff *= 2
+				continue
+			}
+		}
+
 		fullCmd := "git " + strings.Join(args, " ")
-		err := tracerr.Errorf("%w: Command: %s\nEnv: %s\nStdOut: %s\nStdErr: %s", err, fullCmd, statusCmd.Env, outb.String(), errb.String())
-		return outb, err
+		wrapped := tracerr.Errorf("%w: Command: %s\nEnv: %s\nStdOut: %s\nStdErr: %s", runErr, fullCmd, statusCmd.Env, outb.String(), stderr)
+		return outb, wrapped
 	}
-	return outb, nil
+	return outb, tracerr.Errorf("git command failed after retries: %s", strings.Join(args, " "))
 }
 
 func toEnvString(repoConfig RepoConfig) []string {
