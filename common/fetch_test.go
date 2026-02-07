@@ -2,7 +2,6 @@ package common
 
 import (
 	"bytes"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,7 +13,7 @@ import (
 )
 
 func PrepareMultiFixtures(t *testing.T, name string, deps []string) RepoConfig {
-	newTestDataPath, err := ioutil.TempDir(os.TempDir(), "mutli_fixture")
+	newTestDataPath, err := os.MkdirTemp(os.TempDir(), "mutli_fixture")
 	assert.NilError(t, err)
 
 	for _, name := range deps {
@@ -37,12 +36,12 @@ func FixFixtureGitConfig(t *testing.T, newRepoPath string, testDataPath string) 
 	// Fix remote paths
 	dotGitPath := filepath.Join(newRepoPath, ".git")
 	gitConfigFilePath := filepath.Join(dotGitPath, "config")
-	input, err := ioutil.ReadFile(gitConfigFilePath)
+	input, err := os.ReadFile(gitConfigFilePath)
 	assert.NilError(t, err)
 
 	output := bytes.Replace(input, []byte("$TESTDATA$"), []byte(testDataPath), -1)
 
-	err = ioutil.WriteFile(gitConfigFilePath, output, 0666)
+	err = os.WriteFile(gitConfigFilePath, output, 0666)
 	assert.NilError(t, err)
 }
 

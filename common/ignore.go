@@ -25,8 +25,11 @@ func ShouldIgnoreFile(repoPath string, filePath string) (bool, error) {
 		return true, nil
 	}
 
+	if len(filePath) <= len(repoPath) {
+		return false, nil
+	}
 	relativePath := filePath[len(repoPath)+1:]
-	if strings.HasPrefix(relativePath, ".git/") {
+	if strings.HasPrefix(relativePath, ".git/") || relativePath == ".git" {
 		return true, nil
 	}
 

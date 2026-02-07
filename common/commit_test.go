@@ -1,7 +1,6 @@
 package common
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,7 +13,7 @@ import (
 )
 
 func PrepareFixture(t *testing.T, name string) RepoConfig {
-	newRepoPath, err := ioutil.TempDir(os.TempDir(), name)
+	newRepoPath, err := os.MkdirTemp(os.TempDir(), name)
 	assert.NilError(t, err)
 
 	fixturePath := filepath.Join("testdata", name)
@@ -69,7 +68,7 @@ func Test_NewFile(t *testing.T) {
 	err := commit(repoConfig)
 	assert.NilError(t, err)
 
-	HasHeadCommit(t, repoConfig.RepoPath, "28cc969d97ddb7640f5e1428bbc8f2947d1ffd57", "?? 2.md\n")
+	HasHeadCommit(t, repoConfig.RepoPath, "28cc969d97ddb7640f5e1428bbc8f2947d1ffd57", "A 2.md\n")
 }
 
 func Test_OneFileChange(t *testing.T) {
@@ -78,7 +77,7 @@ func Test_OneFileChange(t *testing.T) {
 	err := commit(repoConfig)
 	assert.NilError(t, err)
 
-	HasHeadCommit(t, repoConfig.RepoPath, "28cc969d97ddb7640f5e1428bbc8f2947d1ffd57", " M 1.md\n")
+	HasHeadCommit(t, repoConfig.RepoPath, "28cc969d97ddb7640f5e1428bbc8f2947d1ffd57", "M 1.md\n")
 }
 
 func Test_VimSwapFile(t *testing.T) {
@@ -102,8 +101,8 @@ func Test_MultipleFileChange(t *testing.T) {
 	err := commit(repoConfig)
 	assert.NilError(t, err)
 
-	HasHeadCommit(t, repoConfig.RepoPath, "7058b6b292ee3d1382670334b5f29570a1117ef1", ` D dirA/2.md
- M 1.md
-?? dirB/3.md
+	HasHeadCommit(t, repoConfig.RepoPath, "7058b6b292ee3d1382670334b5f29570a1117ef1", `M 1.md
+D dirA/2.md
+A dirB/3.md
 `)
 }

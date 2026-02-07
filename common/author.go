@@ -7,8 +7,8 @@ import (
 	"github.com/ztrue/tracerr"
 )
 
-var errNoGitAuthorEmail = errors.New("Missing git author email")
-var errNoGitAuthorName = errors.New("Missing git author name")
+var errNoGitAuthorEmail = errors.New("missing git author email")
+var errNoGitAuthorName = errors.New("missing git author name")
 
 func ensureGitAuthor(repoConfig RepoConfig) error {
 	_, err := GitCommand(repoConfig, []string{"config", "user.email"})

@@ -16,7 +16,7 @@ import (
 	git "gopkg.in/src-d/go-git.v4"
 )
 
-var errRepoPathInvalid = errors.New("Not a valid git repo")
+var errRepoPathInvalid = errors.New("not a valid git repo")
 
 func daemonStatus(ctx *cli.Context) error {
 	s, err := common.NewService()
@@ -160,7 +160,7 @@ func daemonRm(ctx *cli.Context) error {
 	}
 
 	if pos == -1 {
-		err = errors.New("Repo Not tracked")
+		err = errors.New("repo not tracked")
 		return tracerr.Errorf("%w - %s", err, repoPath)
 	}
 

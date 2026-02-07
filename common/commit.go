@@ -15,63 +15,63 @@ import (
 )
 
 func commit(repoConfig RepoConfig) error {
-    repoPath := repoConfig.RepoPath
+	repoPath := repoConfig.RepoPath
 
-    // Stage everything (adds, mods, deletions, renames)
-    if _, err := GitCommand(repoConfig, []string{"add", "-A"}); err != nil {
-        return tracerr.Wrap(err)
-    }
+	// Stage everything (adds, mods, deletions, renames)
+	if _, err := GitCommand(repoConfig, []string{"add", "-A"}); err != nil {
+		return tracerr.Wrap(err)
+	}
 
-    // Check if anything is staged; if not, exit early
-    // 'git diff --cached --quiet' exits 1 when there are differences
-    _, err := GitCommand(repoConfig, []string{"diff", "--cached", "--quiet"})
-    if err == nil {
-        // Exit status 0 => no staged changes
-        return nil
-    }
+	// Check if anything is staged; if not, exit early
+	// 'git diff --cached --quiet' exits 1 when there are differences
+	_, err := GitCommand(repoConfig, []string{"diff", "--cached", "--quiet"})
+	if err == nil {
+		// Exit status 0 => no staged changes
+		return nil
+	}
 
-    // Collect staged file list for commit message
-    out, err := GitCommand(repoConfig, []string{"diff", "--cached", "--name-status"})
-    if err != nil {
-        return tracerr.Wrap(err)
-    }
-    raw := strings.TrimSpace(out.String())
-    if raw == "" { // defensive
-        return nil
-    }
+	// Collect staged file list for commit message
+	out, err := GitCommand(repoConfig, []string{"diff", "--cached", "--name-status"})
+	if err != nil {
+		return tracerr.Wrap(err)
+	}
+	raw := strings.TrimSpace(out.String())
+	if raw == "" { // defensive
+		return nil
+	}
 
-    // Filter ignored files (respect existing ShouldIgnoreFile logic)
+	// Filter ignored files (respect existing ShouldIgnoreFile logic)
 	lines := []string{}
-    for _, line := range strings.Split(raw, "\n") {
-        parts := strings.Fields(line)
-        if len(parts) < 2 { // malformed line, keep it
-            lines = append(lines, line)
-            continue
-        }
-        statusCode := parts[0]
-        filePath := parts[len(parts)-1] // In rename lines last token is new path
-        ignore, igErr := ShouldIgnoreFile(repoPath, filePath)
-        if igErr != nil {
-            return tracerr.Wrap(igErr)
-        }
-        if ignore {
-            continue
-        }
-        lines = append(lines, statusCode+" "+filePath)
-    }
+	for _, line := range strings.Split(raw, "\n") {
+		parts := strings.Fields(line)
+		if len(parts) < 2 { // malformed line, keep it
+			lines = append(lines, line)
+			continue
+		}
+		statusCode := parts[0]
+		filePath := parts[len(parts)-1] // In rename lines last token is new path
+		ignore, igErr := ShouldIgnoreFile(repoPath, filePath)
+		if igErr != nil {
+			return tracerr.Wrap(igErr)
+		}
+		if ignore {
+			continue
+		}
+		lines = append(lines, statusCode+" "+filePath)
+	}
 
-    if len(lines) == 0 {
-        // All staged files ignored => unstage them to avoid future confusion
-        _, _ = GitCommand(repoConfig, []string{"reset"})
-        return nil
-    }
+	if len(lines) == 0 {
+		// All staged files ignored => unstage them to avoid future confusion
+		_, _ = GitCommand(repoConfig, []string{"reset"})
+		return nil
+	}
 
 	msg := strings.Join(lines, "\n")
 	if _, err := GitCommand(repoConfig, []string{"commit", "-m", msg}); err != nil {
 		return tracerr.Wrap(err)
 	}
 	log.Printf("git-auto-sync: committed %d file(s) repo=%s\n%s", len(lines), repoPath, msg)
-    return nil
+	return nil
 }
 
 func GitCommand(repoConfig RepoConfig, args []string) (bytes.Buffer, error) {
@@ -143,7 +143,7 @@ func GitCommand(repoConfig RepoConfig, args []string) (bytes.Buffer, error) {
 }
 
 func toEnvString(repoConfig RepoConfig) []string {
-	vals := repoConfig.Env
+	vals := make([]string, 0, len(repoConfig.Env)+4)
 	vals = append(vals, repoConfig.Env...)
 
 	// Include essential environment variables for Git operations
