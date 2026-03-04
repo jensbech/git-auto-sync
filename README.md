@@ -1,5 +1,6 @@
 <p align="center">
-  <img src="assets/icon.png" width="96" height="96" alt="git-auto-sync">
+  <img src="assets/icon.png" width="80" height="80" alt="git-auto-sync"><br><br>
+  <strong>git-auto-sync</strong>
 </p>
 
 # git-auto-sync
@@ -50,6 +51,10 @@ git-auto-sync daemon restart   # restart after an update
 ## macOS menu bar app
 
 Shows sync status for each repo, recent activity log, and native notifications on errors. Install with `just install-app`, or run directly with `just run-app`.
+
+<p align="center">
+  <img src="assets/screenshot.png" width="320" alt="menu bar app screenshot">
+</p>
 
 The app connects to the daemon over a Unix socket. The daemon works fine without it.
 
