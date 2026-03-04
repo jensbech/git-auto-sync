@@ -7,15 +7,39 @@ struct MenuBarIcon: View {
 
     var body: some View {
         let hasError = appState.repos.contains { $0.status == .error }
-        let isDisconnected = appState.connectionState == .disconnected
 
         if hasError {
-            Image(systemName: "exclamationmark.icloud.fill")
-        } else if isDisconnected {
-            Image(systemName: "icloud.slash")
+            Image(systemName: "exclamationmark.triangle.fill")
         } else {
-            Image(systemName: "arrow.triangle.2.circlepath")
+            GSyncShape()
+                .stroke(style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
+                .opacity(appState.connectionState == .disconnected ? 0.4 : 1.0)
+                .frame(width: 17, height: 17)
         }
+    }
+}
+
+private struct GSyncShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let cx = rect.midX
+        let cy = rect.midY
+        let r = min(rect.width, rect.height) * 0.42
+
+        // G arc: 320° counter-clockwise from upper-right (-40°) to right (0°)
+        p.addArc(
+            center: CGPoint(x: cx, y: cy),
+            radius: r,
+            startAngle: .degrees(-40),
+            endAngle: .degrees(0),
+            clockwise: false
+        )
+
+        // Crossbar
+        p.move(to: CGPoint(x: cx + r, y: cy))
+        p.addLine(to: CGPoint(x: cx + r * 0.28, y: cy))
+
+        return p
     }
 }
 

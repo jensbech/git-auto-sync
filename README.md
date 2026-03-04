@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon.svg" width="96" height="96" alt="git-auto-sync">
+</p>
+
 # git-auto-sync
 
 Automatically commits, rebases, and pushes your git repos in the background. You edit files, it keeps them synced. Comes with an optional macOS menu bar app.

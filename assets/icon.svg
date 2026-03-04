@@ -1,0 +1,42 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg" cx="45%" cy="40%" r="70%">
+      <stop offset="0%" stop-color="#1a2035"/>
+      <stop offset="100%" stop-color="#080c14"/>
+    </radialGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="18" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background squircle -->
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+
+  <!-- Subtle track ring -->
+  <circle cx="512" cy="512" r="310" fill="none" stroke="white" stroke-width="1" opacity="0.04"/>
+
+  <!-- G mark -->
+  <g filter="url(#glow)">
+    <!-- Main arc: counter-clockwise from upper-right (680,371) around to right (732,512) -->
+    <!-- large-arc=1, sweep=0 (counter-clockwise in SVG) -->
+    <path d="M 680,371 A 220,220 0 1,0 732,512"
+          fill="none"
+          stroke="#22c55e"
+          stroke-width="82"
+          stroke-linecap="round"/>
+
+    <!-- Crossbar -->
+    <line x1="732" y1="512" x2="572" y2="512"
+          stroke="#22c55e"
+          stroke-width="82"
+          stroke-linecap="round"/>
+
+    <!-- Arrowhead at arc start (680,371), pointing upper-left (direction of arc travel) -->
+    <!-- Base: (688,427)→(734,389), apex: (680,371) -->
+    <polygon points="680,371 688,427 734,389" fill="#22c55e"/>
+  </g>
+</svg>
