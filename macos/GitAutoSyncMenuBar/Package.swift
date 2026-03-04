@@ -9,7 +9,8 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "GitAutoSyncMenuBar",
-            path: "Sources"
+            path: "Sources",
+            resources: [.copy("Resources/AppIcon.icns")]
         )
     ]
 )

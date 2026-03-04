@@ -1,11 +1,11 @@
 <svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <radialGradient id="bg" cx="45%" cy="40%" r="70%">
-      <stop offset="0%" stop-color="#1a2035"/>
-      <stop offset="100%" stop-color="#080c14"/>
+    <radialGradient id="bg" cx="50%" cy="40%" r="65%">
+      <stop offset="0%" stop-color="#1e0d35"/>
+      <stop offset="100%" stop-color="#090512"/>
     </radialGradient>
-    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="18" result="blur"/>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="20" result="blur"/>
       <feMerge>
         <feMergeNode in="blur"/>
         <feMergeNode in="SourceGraphic"/>
@@ -13,30 +13,22 @@
     </filter>
   </defs>
 
-  <!-- Background squircle -->
   <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
 
-  <!-- Subtle track ring -->
-  <circle cx="512" cy="512" r="310" fill="none" stroke="white" stroke-width="1" opacity="0.04"/>
-
-  <!-- G mark -->
-  <g filter="url(#glow)">
-    <!-- Main arc: counter-clockwise from upper-right (680,371) around to right (732,512) -->
-    <!-- large-arc=1, sweep=0 (counter-clockwise in SVG) -->
-    <path d="M 680,371 A 220,220 0 1,0 732,512"
-          fill="none"
-          stroke="#22c55e"
-          stroke-width="82"
-          stroke-linecap="round"/>
-
-    <!-- Crossbar -->
-    <line x1="732" y1="512" x2="572" y2="512"
-          stroke="#22c55e"
-          stroke-width="82"
-          stroke-linecap="round"/>
-
-    <!-- Arrowhead at arc start (680,371), pointing upper-left (direction of arc travel) -->
-    <!-- Base: (688,427)→(734,389), apex: (680,371) -->
-    <polygon points="680,371 688,427 734,389" fill="#22c55e"/>
+  <g filter="url(#glow)" opacity="0.4">
+    <path d="M 304,392 A 240,240 0 0,1 752,512" fill="none" stroke="#a855f7" stroke-width="74"/>
+    <path d="M 720,632 A 240,240 0 0,1 272,512" fill="none" stroke="#a855f7" stroke-width="74"/>
+    <polygon points="752,512 707,432 797,432" fill="#a855f7"/>
+    <polygon points="272,512 317,592 227,592" fill="#a855f7"/>
   </g>
+
+  <!-- Arrow 1: 210° to 0°, clockwise through top (270°), arrowhead at right pointing down -->
+  <path d="M 304,392 A 240,240 0 0,1 752,512"
+        fill="none" stroke="#a855f7" stroke-width="74" stroke-linecap="butt"/>
+  <polygon points="752,512 707,432 797,432" fill="#a855f7"/>
+
+  <!-- Arrow 2: 30° to 180°, clockwise through bottom (90°), arrowhead at left pointing up -->
+  <path d="M 720,632 A 240,240 0 0,1 272,512"
+        fill="none" stroke="#a855f7" stroke-width="74" stroke-linecap="butt"/>
+  <polygon points="272,512 317,592 227,592" fill="#a855f7"/>
 </svg>

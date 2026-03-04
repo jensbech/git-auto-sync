@@ -24,23 +24,39 @@ private struct GSyncShape: Shape {
         var p = Path()
         let cx = rect.midX
         let cy = rect.midY
-        let r = min(rect.width, rect.height) * 0.42
+        let r = min(rect.width, rect.height) * 0.40
+        let aw = r * 0.38
 
-        // G arc: 320° counter-clockwise from upper-right (-40°) to right (0°)
-        p.addArc(
-            center: CGPoint(x: cx, y: cy),
-            radius: r,
-            startAngle: .degrees(-40),
-            endAngle: .degrees(0),
-            clockwise: false
-        )
+        // Arrow 1: clockwise from 30° to 200°
+        p.addArc(center: CGPoint(x: cx, y: cy), radius: r,
+                 startAngle: .degrees(30), endAngle: .degrees(200), clockwise: false)
+        // Arrowhead 1 at 200°: tip, then two base points
+        let a1tip = CGPoint(x: cx + r * cos200, y: cy + r * sin200)
+        p.move(to: a1tip)
+        p.addLine(to: CGPoint(x: a1tip.x + aw * 0.40, y: a1tip.y + aw * 1.10))
+        p.move(to: a1tip)
+        p.addLine(to: CGPoint(x: a1tip.x - aw * 0.85, y: a1tip.y + aw * 0.55))
 
-        // Crossbar
-        p.move(to: CGPoint(x: cx + r, y: cy))
-        p.addLine(to: CGPoint(x: cx + r * 0.28, y: cy))
+        // Arrow 2: clockwise from 210° to 20°
+        p.move(to: CGPoint(x: cx + r * cos210, y: cy + r * sin210))
+        p.addArc(center: CGPoint(x: cx, y: cy), radius: r,
+                 startAngle: .degrees(210), endAngle: .degrees(20), clockwise: false)
+        // Arrowhead 2 at 20°
+        let a2tip = CGPoint(x: cx + r * cos20, y: cy + r * sin20)
+        p.move(to: a2tip)
+        p.addLine(to: CGPoint(x: a2tip.x - aw * 0.40, y: a2tip.y - aw * 1.10))
+        p.move(to: a2tip)
+        p.addLine(to: CGPoint(x: a2tip.x + aw * 0.85, y: a2tip.y - aw * 0.55))
 
         return p
     }
+
+    private let cos200 = CGFloat(cos(200.0 * .pi / 180))
+    private let sin200 = CGFloat(sin(200.0 * .pi / 180))
+    private let cos210 = CGFloat(cos(210.0 * .pi / 180))
+    private let sin210 = CGFloat(sin(210.0 * .pi / 180))
+    private let cos20  = CGFloat(cos(20.0  * .pi / 180))
+    private let sin20  = CGFloat(sin(20.0  * .pi / 180))
 }
 
 struct MenuBarView: View {
