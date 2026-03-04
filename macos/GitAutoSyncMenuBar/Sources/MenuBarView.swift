@@ -10,11 +10,12 @@ struct MenuBarIcon: View {
 
         if hasError {
             Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.primary)
         } else {
-            GSyncShape()
-                .stroke(style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
+            Image(systemName: "arrow.2.circlepath")
+                .font(.system(size: 14))
+                .foregroundStyle(.primary)
                 .opacity(appState.connectionState == .disconnected ? 0.4 : 1.0)
-                .frame(width: 17, height: 17)
         }
     }
 }

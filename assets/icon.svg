@@ -4,31 +4,11 @@
       <stop offset="0%" stop-color="#1e0d35"/>
       <stop offset="100%" stop-color="#090512"/>
     </radialGradient>
-    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="20" result="blur"/>
-      <feMerge>
-        <feMergeNode in="blur"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
-    </filter>
+    <radialGradient id="dot" cx="38%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#d08ef8"/>
+      <stop offset="100%" stop-color="#7c22c4"/>
+    </radialGradient>
   </defs>
-
   <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
-
-  <g filter="url(#glow)" opacity="0.4">
-    <path d="M 304,392 A 240,240 0 0,1 752,512" fill="none" stroke="#a855f7" stroke-width="74"/>
-    <path d="M 720,632 A 240,240 0 0,1 272,512" fill="none" stroke="#a855f7" stroke-width="74"/>
-    <polygon points="752,512 707,432 797,432" fill="#a855f7"/>
-    <polygon points="272,512 317,592 227,592" fill="#a855f7"/>
-  </g>
-
-  <!-- Arrow 1: 210° to 0°, clockwise through top (270°), arrowhead at right pointing down -->
-  <path d="M 304,392 A 240,240 0 0,1 752,512"
-        fill="none" stroke="#a855f7" stroke-width="74" stroke-linecap="butt"/>
-  <polygon points="752,512 707,432 797,432" fill="#a855f7"/>
-
-  <!-- Arrow 2: 30° to 180°, clockwise through bottom (90°), arrowhead at left pointing up -->
-  <path d="M 720,632 A 240,240 0 0,1 272,512"
-        fill="none" stroke="#a855f7" stroke-width="74" stroke-linecap="butt"/>
-  <polygon points="272,512 317,592 227,592" fill="#a855f7"/>
+  <circle cx="512" cy="512" r="300" fill="url(#dot)"/>
 </svg>

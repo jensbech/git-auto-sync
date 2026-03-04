@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icon.svg" width="96" height="96" alt="git-auto-sync">
+  <img src="assets/icon.png" width="96" height="96" alt="git-auto-sync">
 </p>
 
 # git-auto-sync
