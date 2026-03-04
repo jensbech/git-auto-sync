@@ -19,30 +19,60 @@ enum EventFilter: String, CaseIterable {
 struct ActivityLogView: View {
     let appState: AppState
     @State private var filter: EventFilter = .all
+    @State private var repoFilter: String? = nil
+
+    private var uniqueRepos: [String] {
+        var seen = Set<String>()
+        return appState.events.compactMap { event -> String? in
+            seen.insert(event.repo).inserted ? event.repo : nil
+        }
+    }
 
     private var filteredEvents: [DaemonEvent] {
-        appState.events.filter { filter.matches($0) }
+        appState.events.filter { event in
+            filter.matches(event) && (repoFilter == nil || event.repo == repoFilter)
+        }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Text("Activity Log")
-                    .font(.system(size: 14, weight: .semibold))
+            VStack(spacing: 8) {
+                HStack(spacing: 10) {
+                    Text("Activity Log")
+                        .font(.system(size: 14, weight: .semibold))
 
-                Spacer()
+                    Spacer()
 
-                HStack(spacing: 2) {
-                    ForEach(EventFilter.allCases, id: \.self) { tab in
-                        FilterTab(
-                            label: tab.rawValue,
-                            count: appState.events.filter { tab.matches($0) }.count,
-                            isSelected: filter == tab
-                        ) {
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                filter = tab
+                    HStack(spacing: 2) {
+                        ForEach(EventFilter.allCases, id: \.self) { tab in
+                            FilterTab(
+                                label: tab.rawValue,
+                                count: appState.events.filter { tab.matches($0) }.count,
+                                isSelected: filter == tab
+                            ) {
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    filter = tab
+                                }
                             }
                         }
+                    }
+                }
+
+                if uniqueRepos.count > 1 {
+                    HStack(spacing: 2) {
+                        FilterTab(label: "All Repos", count: 0, isSelected: repoFilter == nil) {
+                            withAnimation(.easeInOut(duration: 0.15)) { repoFilter = nil }
+                        }
+                        ForEach(uniqueRepos, id: \.self) { repo in
+                            FilterTab(
+                                label: URL(fileURLWithPath: repo).lastPathComponent,
+                                count: appState.events.filter { $0.repo == repo }.count,
+                                isSelected: repoFilter == repo
+                            ) {
+                                withAnimation(.easeInOut(duration: 0.15)) { repoFilter = repo }
+                            }
+                        }
+                        Spacer()
                     }
                 }
             }
