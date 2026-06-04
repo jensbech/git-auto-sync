@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/rjeczalik/notify"
@@ -21,10 +22,14 @@ type RepoConfig struct {
 	RepoPath     string
 	PollInterval time.Duration
 	FSLag        time.Duration
+	BatchWindow  time.Duration
 	GitExec      string
 	Env          []string
 	Emitter      EventEmitter
 	Clients      ClientChecker
+	State        *RepoStateStore
+	Trigger      chan bool
+	Paused       *atomic.Bool
 }
 
 type AwakeNotifier interface {
@@ -55,6 +60,16 @@ func NewRepoConfig(repoPath string) (RepoConfig, error) {
 		pollInterval = time.Duration(seconds) * time.Second
 	}
 
+	batchWindow := time.Duration(0)
+	if autoSyncSection.Option("batchWindow") != "" {
+		secondsStr := autoSyncSection.Option("batchWindow")
+		seconds, err := strconv.Atoi(secondsStr)
+		if err != nil {
+			return RepoConfig{}, tracerr.Wrap(err)
+		}
+		batchWindow = time.Duration(seconds) * time.Second
+	}
+
 	gitExec := ""
 	if autoSyncSection.Option("exec") != "" {
 		gitExec = autoSyncSection.Option("exec")
@@ -69,19 +84,46 @@ func NewRepoConfig(repoPath string) (RepoConfig, error) {
 		RepoPath:     repoPath,
 		PollInterval: pollInterval,
 		FSLag:        1 * time.Second,
+		BatchWindow:  batchWindow,
 		GitExec:      gitExec,
 	}, nil
+}
+
+func (cfg RepoConfig) isPaused() bool {
+	if cfg.Paused == nil {
+		return false
+	}
+	return cfg.Paused.Load()
 }
 
 func WatchForChanges(ctx context.Context, cfg RepoConfig) error {
 	repoPath := cfg.RepoPath
 	log.Printf("watch: starting for repo=%s", repoPath)
 
-	if err := AutoSync(cfg); err != nil {
-		log.Printf("watch: initial autosync error repo=%s err=%v", repoPath, err)
+	if cfg.State != nil {
+		cfg.State.SetWatching(repoPath, true)
+		cfg.State.SetSettings(repoPath, int(cfg.PollInterval/time.Second), int(cfg.BatchWindow/time.Second))
+		defer cfg.State.SetWatching(repoPath, false)
 	}
 
-	notifyFilteredChannel := make(chan bool, 100)
+	runSync := func(trigger string) {
+		if cfg.isPaused() {
+			log.Printf("autosync: skip (paused) repo=%s trigger=%s", repoPath, trigger)
+			return
+		}
+		if err := AutoSync(cfg); err != nil {
+			log.Printf("autosync: %s failed repo=%s err=%v", trigger, repoPath, err)
+		} else {
+			log.Printf("autosync: %s success repo=%s", trigger, repoPath)
+		}
+	}
+
+	runSync("initial")
+
+	trigger := cfg.Trigger
+	if trigger == nil {
+		trigger = make(chan bool, 100)
+	}
 	pollTicker := time.NewTicker(cfg.PollInterval)
 
 	go func() {
@@ -91,42 +133,82 @@ func WatchForChanges(ctx context.Context, cfg RepoConfig) error {
 		if err != nil {
 			log.Printf("awake: init error repo=%s err=%v", repoPath, err)
 		} else {
-			if err := notifier.Start(notifyFilteredChannel); err != nil {
+			if err := notifier.Start(trigger); err != nil {
 				log.Printf("awake: start error repo=%s err=%v", repoPath, err)
 			}
 		}
 
 		backoff := 1 * time.Second
 		maxBackoff := 60 * time.Second
-
 		cooldown := 5 * time.Second
+
+		var batchTimer *time.Timer
+		var batchTimerC <-chan time.Time
+
+		armBatch := func() {
+			if cfg.BatchWindow <= 0 {
+				return
+			}
+			due := time.Now().Add(cfg.BatchWindow)
+			if batchTimer != nil {
+				batchTimer.Stop()
+			}
+			batchTimer = time.NewTimer(cfg.BatchWindow)
+			batchTimerC = batchTimer.C
+			if cfg.State != nil {
+				cfg.State.SetBatchPending(repoPath, true, due.Unix())
+			}
+		}
+		disarmBatch := func() {
+			if batchTimer != nil {
+				batchTimer.Stop()
+				batchTimer = nil
+				batchTimerC = nil
+			}
+			if cfg.State != nil {
+				cfg.State.SetBatchPending(repoPath, false, 0)
+			}
+		}
+
+		fire := func(label string) {
+			if cfg.isPaused() {
+				log.Printf("autosync: skip (paused) repo=%s trigger=%s", repoPath, label)
+				return
+			}
+			time.Sleep(cfg.FSLag)
+			if err := AutoSync(cfg); err != nil {
+				log.Printf("autosync: %s failed repo=%s err=%v", label, repoPath, err)
+				time.Sleep(backoff)
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			} else {
+				log.Printf("autosync: %s success repo=%s backoff-reset", label, repoPath)
+				backoff = 1 * time.Second
+			}
+			drainChannel(trigger)
+			time.Sleep(cooldown)
+			drainChannel(trigger)
+		}
 
 		for {
 			select {
 			case <-ctx.Done():
+				disarmBatch()
 				return
-			case <-notifyFilteredChannel:
-				time.Sleep(cfg.FSLag)
-				if err := AutoSync(cfg); err != nil {
-					log.Printf("autosync: fs-event failed repo=%s err=%v", repoPath, err)
-					time.Sleep(backoff)
-					backoff *= 2
-					if backoff > maxBackoff {
-						backoff = maxBackoff
-					}
+			case <-trigger:
+				if cfg.BatchWindow > 0 {
+					armBatch()
 				} else {
-					log.Printf("autosync: fs-event success repo=%s backoff-reset", repoPath)
-					backoff = 1 * time.Second
+					fire("fs-event")
 				}
-				drainChannel(notifyFilteredChannel)
-				time.Sleep(cooldown)
-				drainChannel(notifyFilteredChannel)
+			case <-batchTimerC:
+				disarmBatch()
+				fire("batch")
 			case <-pollTicker.C:
-				if err := AutoSync(cfg); err != nil {
-					log.Printf("autosync: poll failed repo=%s err=%v", repoPath, err)
-				} else {
-					log.Printf("autosync: poll success repo=%s", repoPath)
-				}
+				disarmBatch()
+				fire("poll")
 			}
 		}
 	}()
@@ -160,7 +242,7 @@ func WatchForChanges(ctx context.Context, cfg RepoConfig) error {
 
 			log.Printf("watch: event repo=%s op=%v path=%s", repoPath, ei.Event(), path)
 			select {
-			case notifyFilteredChannel <- true:
+			case trigger <- true:
 			default:
 				log.Printf("watch: filtered-channel-full repo=%s path=%s", repoPath, path)
 			}

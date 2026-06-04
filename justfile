@@ -32,6 +32,7 @@ install-app: build-app
     mkdir -p "$app_dir/Contents/MacOS"
     mkdir -p "$app_dir/Contents/Resources"
     cp macos/GitAutoSyncMenuBar/.build/release/GitAutoSyncMenuBar "$app_dir/Contents/MacOS/"
+    cp assets/AppIcon.icns "$app_dir/Contents/Resources/AppIcon.icns"
     cat > "$app_dir/Contents/Info.plist" << 'PLIST'
     <?xml version="1.0" encoding="UTF-8"?>
     <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -43,6 +44,8 @@ install-app: build-app
         <string>com.gitautosync.menubar</string>
         <key>CFBundleName</key>
         <string>Git Auto Sync</string>
+        <key>CFBundleIconFile</key>
+        <string>AppIcon</string>
         <key>CFBundleVersion</key>
         <string>1.0</string>
         <key>CFBundleShortVersionString</key>
@@ -54,6 +57,7 @@ install-app: build-app
     </dict>
     </plist>
     PLIST
+    touch "$app_dir"
     echo "Installed to $app_dir"
 
 install-all: install install-app

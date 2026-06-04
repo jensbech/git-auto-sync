@@ -1,14 +1,45 @@
-<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <radialGradient id="bg" cx="50%" cy="40%" r="65%">
-      <stop offset="0%" stop-color="#1e0d35"/>
-      <stop offset="100%" stop-color="#090512"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#214f6c"/>
+      <stop offset="1" stop-color="#0a1f2c"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#c8ffe7"/>
+      <stop offset="0.55" stop-color="#5ce0b5"/>
+      <stop offset="1" stop-color="#1d8e6c"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.24"/>
+      <stop offset="0.40" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="vignette" cx="0.5" cy="0.85" r="0.85">
+      <stop offset="0.55" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.45"/>
     </radialGradient>
-    <radialGradient id="dot" cx="38%" cy="35%" r="65%">
-      <stop offset="0%" stop-color="#d08ef8"/>
-      <stop offset="100%" stop-color="#7c22c4"/>
+    <radialGradient id="centerGlow" cx="0.5" cy="0.5" r="0.45">
+      <stop offset="0" stop-color="#5ce0b5" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#5ce0b5" stop-opacity="0"/>
     </radialGradient>
   </defs>
-  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
-  <circle cx="512" cy="512" r="300" fill="url(#dot)"/>
+
+  <rect width="1024" height="1024" rx="224" ry="224" fill="url(#bg)"/>
+  <rect width="1024" height="1024" rx="224" ry="224" fill="url(#vignette)"/>
+  <rect width="1024" height="1024" rx="224" ry="224" fill="url(#sheen)"/>
+
+  <circle cx="512" cy="512" r="320" fill="url(#centerGlow)"/>
+
+  <g>
+    <path d="M 290 408 A 245 245 0 0 1 756 533"
+          fill="none" stroke="url(#arrow)" stroke-width="78" stroke-linecap="round"/>
+    <polygon points="696,528 816,538 751,604" fill="url(#arrow)"/>
+
+    <path d="M 734 616 A 245 245 0 0 1 268 491"
+          fill="none" stroke="url(#arrow)" stroke-width="78" stroke-linecap="round"/>
+    <polygon points="208,486 328,496 273,420" fill="url(#arrow)"/>
+
+    <circle cx="290" cy="408" r="20" fill="#dcfff0"/>
+    <circle cx="734" cy="616" r="20" fill="#dcfff0"/>
+  </g>
 </svg>

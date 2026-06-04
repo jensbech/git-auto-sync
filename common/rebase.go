@@ -2,9 +2,13 @@ package common
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/ztrue/tracerr"
 	git "gopkg.in/src-d/go-git.v4"
@@ -18,6 +22,10 @@ func rebase(repoConfig RepoConfig) error {
 	bi, err := fetchBranchInfo(repoPath)
 	if err != nil {
 		return tracerr.Wrap(err)
+	}
+
+	if bi.UpstreamRemote == "" || bi.UpstreamBranch == "" {
+		return nil
 	}
 
 	_, rebaseErr := GitCommand(repoConfig, []string{"rebase", bi.UpstreamRemote + "/" + bi.UpstreamBranch})
@@ -77,7 +85,6 @@ func fetchBranchInfo(repoPath string) (branchInfo, error) {
 	currentBranchName := ref.Target().Short()
 	branchConfig := config.Branches[currentBranchName]
 	if branchConfig == nil {
-		// No tracking branch, nothing to do
 		return branchInfo{CurrentBranch: currentBranchName}, nil
 	}
 
@@ -100,4 +107,36 @@ func isRebasing(repoPath string) (bool, error) {
 	}
 
 	return ra || rm, nil
+}
+
+func readConflictFiles(cfg RepoConfig) []string {
+	out, err := GitCommand(cfg, []string{"diff", "--name-only", "--diff-filter=U"})
+	if err != nil {
+		return nil
+	}
+	raw := strings.TrimSpace(out.String())
+	if raw == "" {
+		return nil
+	}
+	var files []string
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			files = append(files, line)
+		}
+	}
+	return files
+}
+
+func logConflict(cfg RepoConfig, files []string) {
+	logDir := filepath.Join(cfg.RepoPath, ".git", "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(logDir, "auto-sync"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s rebase-conflict files=%s\n", time.Now().Format(time.RFC3339), strings.Join(files, ","))
 }

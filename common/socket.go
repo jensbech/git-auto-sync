@@ -11,8 +11,9 @@ import (
 )
 
 type SocketCommand struct {
-	Cmd  string `json:"cmd"`
-	Repo string `json:"repo,omitempty"`
+	Cmd      string            `json:"cmd"`
+	Repo     string            `json:"repo,omitempty"`
+	Settings map[string]string `json:"settings,omitempty"`
 }
 
 type CommandHandler interface {
@@ -25,6 +26,7 @@ type SocketServer struct {
 	mu       sync.RWMutex
 	handler  CommandHandler
 	done     chan struct{}
+	welcome  func() interface{}
 }
 
 func DefaultSocketPath() string {
@@ -53,6 +55,12 @@ func NewSocketServer(socketPath string, handler CommandHandler) (*SocketServer, 
 	}, nil
 }
 
+func (s *SocketServer) SetWelcomeProvider(fn func() interface{}) {
+	s.mu.Lock()
+	s.welcome = fn
+	s.mu.Unlock()
+}
+
 func (s *SocketServer) Accept() {
 	for {
 		conn, err := s.listener.Accept()
@@ -68,7 +76,17 @@ func (s *SocketServer) Accept() {
 
 		s.mu.Lock()
 		s.clients[conn] = struct{}{}
+		welcome := s.welcome
 		s.mu.Unlock()
+
+		if welcome != nil {
+			if msg := welcome(); msg != nil {
+				if data, err := json.Marshal(msg); err == nil {
+					data = append(data, '\n')
+					_, _ = conn.Write(data)
+				}
+			}
+		}
 
 		go s.handleClient(conn)
 	}
@@ -83,6 +101,7 @@ func (s *SocketServer) handleClient(conn net.Conn) {
 	}()
 
 	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		var cmd SocketCommand
 		if err := json.Unmarshal(scanner.Bytes(), &cmd); err != nil {
@@ -118,6 +137,29 @@ func (s *SocketServer) handleClient(conn net.Conn) {
 
 func (s *SocketServer) Emit(ev Event) {
 	data, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	data = append(data, '\n')
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for conn := range s.clients {
+		_, writeErr := conn.Write(data)
+		if writeErr != nil {
+			go func(c net.Conn) {
+				s.mu.Lock()
+				delete(s.clients, c)
+				s.mu.Unlock()
+				c.Close()
+			}(conn)
+		}
+	}
+}
+
+func (s *SocketServer) Broadcast(payload interface{}) {
+	data, err := json.Marshal(payload)
 	if err != nil {
 		return
 	}

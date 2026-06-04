@@ -72,6 +72,9 @@ func commit(repoConfig RepoConfig) error {
 	}
 	log.Printf("git-auto-sync: committed %d file(s) repo=%s\n%s", len(lines), repoPath, msg)
 	emitEvent(repoConfig, NewEvent("commit", repoPath, msg, ""))
+	if repoConfig.State != nil {
+		repoConfig.State.MarkSuccess(repoPath, "committed")
+	}
     return nil
 }
 

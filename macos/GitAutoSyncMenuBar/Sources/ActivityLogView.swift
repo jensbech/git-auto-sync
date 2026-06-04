@@ -8,115 +8,11 @@ enum EventFilter: String, CaseIterable {
 
     func matches(_ event: DaemonEvent) -> Bool {
         switch self {
-        case .all: true
-        case .commits: event.type == "commit"
-        case .pushes: event.type == "push"
-        case .errors: event.type == "error"
+        case .all: return true
+        case .commits: return event.type == "commit"
+        case .pushes: return event.type == "push" || event.type == "synced"
+        case .errors: return event.type == "error" || event.type == "conflict" || event.type == "preflight"
         }
-    }
-}
-
-struct ActivityLogView: View {
-    let appState: AppState
-    @State private var filter: EventFilter = .all
-    @State private var repoFilter: String? = nil
-
-    private var uniqueRepos: [String] {
-        var seen = Set<String>()
-        return appState.events.compactMap { event -> String? in
-            seen.insert(event.repo).inserted ? event.repo : nil
-        }
-    }
-
-    private var filteredEvents: [DaemonEvent] {
-        appState.events.filter { event in
-            filter.matches(event) && (repoFilter == nil || event.repo == repoFilter)
-        }
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            VStack(spacing: 8) {
-                HStack(spacing: 10) {
-                    Text("Activity Log")
-                        .font(.system(size: 14, weight: .semibold))
-
-                    Spacer()
-
-                    HStack(spacing: 2) {
-                        ForEach(EventFilter.allCases, id: \.self) { tab in
-                            FilterTab(
-                                label: tab.rawValue,
-                                count: appState.events.filter { tab.matches($0) }.count,
-                                isSelected: filter == tab
-                            ) {
-                                withAnimation(.easeInOut(duration: 0.15)) {
-                                    filter = tab
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if uniqueRepos.count > 1 {
-                    HStack(spacing: 2) {
-                        FilterTab(label: "All Repos", count: 0, isSelected: repoFilter == nil) {
-                            withAnimation(.easeInOut(duration: 0.15)) { repoFilter = nil }
-                        }
-                        ForEach(uniqueRepos, id: \.self) { repo in
-                            FilterTab(
-                                label: URL(fileURLWithPath: repo).lastPathComponent,
-                                count: appState.events.filter { $0.repo == repo }.count,
-                                isSelected: repoFilter == repo
-                            ) {
-                                withAnimation(.easeInOut(duration: 0.15)) { repoFilter = repo }
-                            }
-                        }
-                        Spacer()
-                    }
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 44)
-            .padding(.bottom, 12)
-            .background(.bar)
-
-            Divider()
-
-            if filteredEvents.isEmpty {
-                if appState.events.isEmpty {
-                    ContentUnavailableView(
-                        "No Events Yet",
-                        systemImage: "arrow.triangle.2.circlepath",
-                        description: Text("Events will appear here as repositories sync.")
-                    )
-                } else {
-                    ContentUnavailableView(
-                        "No \(filter.rawValue)",
-                        systemImage: "line.3.horizontal.decrease.circle",
-                        description: Text("No \(filter.rawValue.lowercased()) events recorded.")
-                    )
-                }
-            } else {
-                ScrollViewReader { proxy in
-                    List(filteredEvents) { event in
-                        EventRow(event: event)
-                            .id(event.id)
-                            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
-                            .listRowSeparator(.hidden)
-                    }
-                    .listStyle(.plain)
-                    .onChange(of: appState.events.count) { _, _ in
-                        if let last = filteredEvents.last {
-                            withAnimation {
-                                proxy.scrollTo(last.id, anchor: .bottom)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        .frame(minWidth: 480, minHeight: 320)
     }
 }
 
@@ -145,12 +41,11 @@ struct FilterTab: View {
                 }
             }
             .foregroundStyle(isSelected ? .primary : .secondary)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
             .background(
                 RoundedRectangle(cornerRadius: 6)
                     .fill(isSelected ? Color(NSColor.controlBackgroundColor) : .clear)
-                    .shadow(color: .black.opacity(isSelected ? 0.08 : 0), radius: 1, y: 1)
             )
         }
         .buttonStyle(.plain)
@@ -159,7 +54,6 @@ struct FilterTab: View {
 
 struct EventRow: View {
     let event: DaemonEvent
-    @State private var appeared = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -191,18 +85,12 @@ struct EventRow: View {
                     Text(message)
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundStyle(.secondary)
-                        .lineLimit(3)
+                        .lineLimit(4)
                         .textSelection(.enabled)
                 }
             }
             .padding(.vertical, 8)
             .padding(.horizontal, 12)
-        }
-        .opacity(appeared ? 1 : 0)
-        .onAppear {
-            withAnimation(.easeOut(duration: 0.2)) {
-                appeared = true
-            }
         }
     }
 
@@ -212,11 +100,13 @@ struct EventRow: View {
 
     private var eventColor: Color {
         switch event.type {
-        case "commit": .blue
-        case "push": .green
-        case "synced": .mint
-        case "error": .red
-        default: .secondary
+        case "commit": return .blue
+        case "push": return .green
+        case "synced": return .mint
+        case "error": return .red
+        case "conflict": return .orange
+        case "preflight": return .yellow
+        default: return .secondary
         }
     }
 

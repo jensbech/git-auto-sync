@@ -4,8 +4,12 @@ import (
 	"context"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -14,13 +18,21 @@ import (
 	"github.com/kardianos/service"
 )
 
+type watcherHandle struct {
+	cancel  context.CancelFunc
+	trigger chan bool
+	paused  *atomic.Bool
+}
+
 type Daemon struct {
 	mu       sync.Mutex
+	ctx      context.Context
 	cancel   context.CancelFunc
-	watchers map[string]context.CancelFunc
+	watchers map[string]*watcherHandle
 	wg       sync.WaitGroup
 	emitter  common.EventEmitter
 	sock     *common.SocketServer
+	state    *common.RepoStateStore
 }
 
 func (d *Daemon) Start(s service.Service) error {
@@ -30,8 +42,10 @@ func (d *Daemon) Start(s service.Service) error {
 
 func (d *Daemon) run() {
 	ctx, cancel := context.WithCancel(context.Background())
+	d.ctx = ctx
 	d.cancel = cancel
-	d.watchers = make(map[string]context.CancelFunc)
+	d.watchers = make(map[string]*watcherHandle)
+	d.state = common.NewRepoStateStore()
 	d.emitter = common.NewLogEmitter()
 
 	socketPath := common.DefaultSocketPath()
@@ -41,6 +55,24 @@ func (d *Daemon) run() {
 	} else {
 		d.sock = sock
 		d.emitter = common.NewMultiEmitter(common.NewLogEmitter(), sock)
+
+		sock.SetWelcomeProvider(func() interface{} {
+			return map[string]interface{}{
+				"type":   "hello",
+				"daemon": "running",
+				"repos":  d.state.Snapshot(),
+			}
+		})
+
+		d.state.OnChange(func(rs common.RepoState) {
+			sock.Broadcast(map[string]interface{}{
+				"type": "state",
+				"repo": rs.Path,
+				"ts":   time.Now().Unix(),
+				"data": rs,
+			})
+		})
+
 		go sock.Accept()
 	}
 
@@ -49,6 +81,10 @@ func (d *Daemon) run() {
 		log.Printf("daemon: failed to read config after retries: %v", err)
 		cancel()
 		return
+	}
+
+	for _, rp := range config.Repos {
+		d.state.Ensure(rp)
 	}
 
 	d.startWatchers(ctx, config)
@@ -102,7 +138,13 @@ func (d *Daemon) startWatchers(ctx context.Context, config *cfg.Config) {
 
 func (d *Daemon) startWatcher(ctx context.Context, repoPath string, config *cfg.Config) {
 	watchCtx, watchCancel := context.WithCancel(ctx)
-	d.watchers[repoPath] = watchCancel
+	handle := &watcherHandle{
+		cancel:  watchCancel,
+		trigger: make(chan bool, 100),
+		paused:  &atomic.Bool{},
+	}
+	d.watchers[repoPath] = handle
+	d.state.Ensure(repoPath)
 
 	d.wg.Add(1)
 	log.Printf("daemon: monitoring %s", repoPath)
@@ -112,15 +154,20 @@ func (d *Daemon) startWatcher(ctx context.Context, repoPath string, config *cfg.
 		repoCfg, err := common.NewRepoConfig(repoPath)
 		if err != nil {
 			log.Printf("daemon: config error for %s: %v", repoPath, err)
+			d.state.MarkError(repoPath, "config error: "+err.Error())
 			return
 		}
 
 		repoCfg.Env = append(repoCfg.Env, config.Envs...)
 		repoCfg.Emitter = d.emitter
 		repoCfg.Clients = d.sock
+		repoCfg.State = d.state
+		repoCfg.Trigger = handle.trigger
+		repoCfg.Paused = handle.paused
 
 		if err := common.WatchForChanges(watchCtx, repoCfg); err != nil {
 			log.Printf("daemon: watcher error for %s: %v", repoPath, err)
+			d.state.MarkError(repoPath, "watcher error: "+err.Error())
 		}
 	}()
 }
@@ -134,11 +181,12 @@ func (d *Daemon) reconcileWatchers(ctx context.Context, config *cfg.Config) {
 		desired[rp] = true
 	}
 
-	for rp, cancel := range d.watchers {
+	for rp, h := range d.watchers {
 		if !desired[rp] {
 			log.Printf("daemon: stopping watcher for removed repo %s", rp)
-			cancel()
+			h.cancel()
 			delete(d.watchers, rp)
+			d.state.Remove(rp)
 		}
 	}
 
@@ -147,6 +195,31 @@ func (d *Daemon) reconcileWatchers(ctx context.Context, config *cfg.Config) {
 			d.startWatcher(ctx, rp, config)
 		}
 	}
+}
+
+func (d *Daemon) restartWatcher(repoPath string) {
+	d.mu.Lock()
+	handle, ok := d.watchers[repoPath]
+	if !ok {
+		d.mu.Unlock()
+		return
+	}
+	handle.cancel()
+	delete(d.watchers, repoPath)
+	d.mu.Unlock()
+
+	config, err := cfg.Read()
+	if err != nil {
+		log.Printf("daemon: restart-watcher config read failed: %v", err)
+		return
+	}
+
+	if d.ctx == nil || d.ctx.Err() != nil {
+		return
+	}
+	d.mu.Lock()
+	d.startWatcher(d.ctx, repoPath, config)
+	d.mu.Unlock()
 }
 
 func (d *Daemon) Stop(s service.Service) error {
@@ -175,27 +248,16 @@ func (d *Daemon) Stop(s service.Service) error {
 func (d *Daemon) HandleCommand(cmd common.SocketCommand) (interface{}, error) {
 	switch cmd.Cmd {
 	case "list", "status":
-		config, err := cfg.Read()
-		if err != nil {
-			return nil, err
-		}
-		type repoInfo struct {
-			Path   string `json:"path"`
-			Status string `json:"status"`
-		}
-		repos := make([]repoInfo, 0, len(config.Repos))
-		for _, rp := range config.Repos {
-			repos = append(repos, repoInfo{Path: rp, Status: "ok"})
-		}
+		repos := d.state.Snapshot()
 		return map[string]interface{}{
 			"type":   "status",
-			"repos":  repos,
 			"daemon": "running",
+			"repos":  repos,
 		}, nil
 
 	case "add":
 		if cmd.Repo == "" {
-			return nil, nil
+			return map[string]string{"error": "missing repo"}, nil
 		}
 		config, err := cfg.Read()
 		if err != nil {
@@ -210,12 +272,13 @@ func (d *Daemon) HandleCommand(cmd common.SocketCommand) (interface{}, error) {
 		if err := cfg.Write(config); err != nil {
 			return nil, err
 		}
+		d.state.Ensure(cmd.Repo)
 		_ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP)
 		return map[string]string{"status": "added"}, nil
 
 	case "remove":
 		if cmd.Repo == "" {
-			return nil, nil
+			return map[string]string{"error": "missing repo"}, nil
 		}
 		config, err := cfg.Read()
 		if err != nil {
@@ -239,9 +302,119 @@ func (d *Daemon) HandleCommand(cmd common.SocketCommand) (interface{}, error) {
 		}
 		_ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP)
 		return map[string]string{"status": "removed"}, nil
+
+	case "sync_now":
+		if cmd.Repo == "" {
+			return map[string]string{"error": "missing repo"}, nil
+		}
+		d.mu.Lock()
+		handle, ok := d.watchers[cmd.Repo]
+		d.mu.Unlock()
+		if !ok {
+			return map[string]string{"status": "not_watching"}, nil
+		}
+		select {
+		case handle.trigger <- true:
+		default:
+		}
+		return map[string]string{"status": "triggered"}, nil
+
+	case "pause":
+		if cmd.Repo == "" {
+			return map[string]string{"error": "missing repo"}, nil
+		}
+		d.mu.Lock()
+		handle, ok := d.watchers[cmd.Repo]
+		d.mu.Unlock()
+		if !ok {
+			return map[string]string{"status": "not_watching"}, nil
+		}
+		handle.paused.Store(true)
+		d.state.SetPaused(cmd.Repo, true)
+		return map[string]string{"status": "paused"}, nil
+
+	case "resume":
+		if cmd.Repo == "" {
+			return map[string]string{"error": "missing repo"}, nil
+		}
+		d.mu.Lock()
+		handle, ok := d.watchers[cmd.Repo]
+		d.mu.Unlock()
+		if !ok {
+			return map[string]string{"status": "not_watching"}, nil
+		}
+		handle.paused.Store(false)
+		d.state.SetPaused(cmd.Repo, false)
+		select {
+		case handle.trigger <- true:
+		default:
+		}
+		return map[string]string{"status": "resumed"}, nil
+
+	case "get_settings":
+		if cmd.Repo == "" {
+			return map[string]string{"error": "missing repo"}, nil
+		}
+		return d.readRepoSettings(cmd.Repo)
+
+	case "set_settings":
+		if cmd.Repo == "" {
+			return map[string]string{"error": "missing repo"}, nil
+		}
+		if err := d.writeRepoSettings(cmd.Repo, cmd.Settings); err != nil {
+			return map[string]string{"error": err.Error()}, nil
+		}
+		d.restartWatcher(cmd.Repo)
+		return map[string]string{"status": "saved"}, nil
 	}
 
 	return map[string]string{"error": "unknown command"}, nil
+}
+
+func (d *Daemon) readRepoSettings(repoPath string) (map[string]interface{}, error) {
+	out := map[string]interface{}{
+		"repo": repoPath,
+	}
+	for key, alias := range map[string]string{
+		"syncInterval": "pollInterval",
+		"batchWindow":  "batchWindow",
+		"exec":         "exec",
+	} {
+		cmd := exec.Command("git", "config", "--get", "auto-sync."+key)
+		cmd.Dir = repoPath
+		buf, err := cmd.Output()
+		val := strings.TrimSpace(string(buf))
+		if err == nil && val != "" {
+			if n, err := strconv.Atoi(val); err == nil {
+				out[alias] = n
+			} else {
+				out[alias] = val
+			}
+		} else {
+			out[alias] = nil
+		}
+	}
+	return out, nil
+}
+
+func (d *Daemon) writeRepoSettings(repoPath string, settings map[string]string) error {
+	allowed := map[string]string{
+		"pollInterval": "syncInterval",
+		"batchWindow":  "batchWindow",
+		"exec":         "exec",
+	}
+	for k, v := range settings {
+		gitKey, ok := allowed[k]
+		if !ok {
+			continue
+		}
+		cmd := exec.Command("git", "config", "auto-sync."+gitKey, v)
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func main() {

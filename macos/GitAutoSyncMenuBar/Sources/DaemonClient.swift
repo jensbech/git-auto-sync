@@ -1,23 +1,18 @@
 import Foundation
-
-enum ConnectionState {
-    case disconnected
-    case connecting
-    case connected
-}
+import Darwin
 
 final class DaemonClient: @unchecked Sendable {
     private let socketPath: String
     private var fileDescriptor: Int32 = -1
     private var readTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
-    private var eventContinuation: AsyncStream<DaemonEvent>.Continuation?
+    private var messageContinuation: AsyncStream<DaemonMessage>.Continuation?
 
     private(set) var connectionState: ConnectionState = .disconnected
 
-    lazy var events: AsyncStream<DaemonEvent> = {
+    lazy var messages: AsyncStream<DaemonMessage> = {
         AsyncStream { [weak self] continuation in
-            self?.eventContinuation = continuation
+            self?.messageContinuation = continuation
         }
     }()
 
@@ -29,6 +24,9 @@ final class DaemonClient: @unchecked Sendable {
     func connect() {
         guard connectionState == .disconnected else { return }
         connectionState = .connecting
+
+        // Materialize lazy stream so the continuation is registered before reads start.
+        _ = self.messages
 
         let fd = Self.connectSocket(socketPath)
         guard fd >= 0 else {
@@ -44,7 +42,7 @@ final class DaemonClient: @unchecked Sendable {
 
     private func startReading(fd: Int32) {
         readTask = Task.detached { [weak self] in
-            let bufferSize = 4096
+            let bufferSize = 8192
             var lineBuffer = Data()
             var buffer = [UInt8](repeating: 0, count: bufferSize)
 
@@ -60,8 +58,8 @@ final class DaemonClient: @unchecked Sendable {
                     let lineData = lineBuffer[lineBuffer.startIndex..<newlineIndex]
                     lineBuffer = Data(lineBuffer[lineBuffer.index(after: newlineIndex)...])
 
-                    if let event = try? JSONDecoder().decode(DaemonEvent.self, from: Data(lineData)) {
-                        self?.eventContinuation?.yield(event)
+                    if let msg = Self.decodeMessage(Data(lineData)) {
+                        self?.messageContinuation?.yield(msg)
                     }
                 }
             }
@@ -73,6 +71,36 @@ final class DaemonClient: @unchecked Sendable {
                 self?.scheduleReconnect()
             }
         }
+    }
+
+    static func decodeMessage(_ data: Data) -> DaemonMessage? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = json["type"] as? String else {
+            if let s = String(data: data, encoding: .utf8), !s.isEmpty {
+                NSLog("git-auto-sync: unparseable message: %@", s)
+            }
+            return nil
+        }
+
+        let decoder = JSONDecoder()
+        switch type {
+        case "hello":
+            struct Hello: Codable { let repos: [RepoState] }
+            if let h = try? decoder.decode(Hello.self, from: data) {
+                return .hello(h.repos)
+            }
+        case "state":
+            struct StateMsg: Codable { let data: RepoState }
+            if let s = try? decoder.decode(StateMsg.self, from: data) {
+                return .state(s.data)
+            }
+        default:
+            if let e = try? decoder.decode(DaemonEvent.self, from: data) {
+                return .event(e)
+            }
+        }
+        NSLog("git-auto-sync: failed to decode message type=%@", type)
+        return nil
     }
 
     func disconnect() {
@@ -89,14 +117,15 @@ final class DaemonClient: @unchecked Sendable {
 
     private func scheduleReconnect() {
         reconnectTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
             if !Task.isCancelled {
                 self?.connect()
             }
         }
     }
 
-    func sendCommandOneShot(_ command: SocketCommand) async -> StatusResponse? {
+    @discardableResult
+    func sendCommand(_ command: SocketCommand) async -> Data? {
         let fd = Self.connectSocket(socketPath)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
@@ -113,12 +142,34 @@ final class DaemonClient: @unchecked Sendable {
         var tv = timeval(tv_sec: 5, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
+        var collected = Data()
         var buffer = [UInt8](repeating: 0, count: 8192)
-        let bytesRead = read(fd, &buffer, buffer.count)
-        guard bytesRead > 0 else { return nil }
+        // Read until we've seen the response newline (skip a possible welcome 'hello' frame first).
+        var responses: [Data] = []
+        while responses.count < 2 {
+            let bytesRead = read(fd, &buffer, buffer.count)
+            if bytesRead <= 0 { break }
+            collected.append(contentsOf: buffer[0..<bytesRead])
+            while let nl = collected.firstIndex(of: UInt8(ascii: "\n")) {
+                let line = Data(collected[collected.startIndex..<nl])
+                collected = Data(collected[collected.index(after: nl)...])
+                responses.append(line)
+            }
+        }
 
-        let responseData = Data(buffer[0..<bytesRead])
-        return try? JSONDecoder().decode(StatusResponse.self, from: responseData)
+        // Return the first response that isn't a hello frame.
+        for line in responses {
+            if let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+               (json["type"] as? String) != "hello" {
+                return line
+            }
+        }
+        return responses.first
+    }
+
+    func sendStatusCommand() async -> StatusResponse? {
+        guard let data = await sendCommand(SocketCommand(cmd: "status")) else { return nil }
+        return try? JSONDecoder().decode(StatusResponse.self, from: data)
     }
 
     private static func connectSocket(_ path: String) -> Int32 {
