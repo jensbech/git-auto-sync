@@ -9,7 +9,14 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "GitAutoSyncMenuBar",
-            path: "Sources"
-        )
+            path: "Sources",
+            exclude: ["Resources/AppIcon.icns"]
+        ),
+        .testTarget(
+            name: "GitAutoSyncMenuBarTests",
+            dependencies: ["GitAutoSyncMenuBar"],
+            path: "Tests/GitAutoSyncMenuBarTests",
+            resources: [.copy("Fixtures")]
+        ),
     ]
 )

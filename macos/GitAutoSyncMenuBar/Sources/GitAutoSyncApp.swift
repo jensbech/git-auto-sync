@@ -1,19 +1,25 @@
+import AppKit
 import SwiftUI
 
 @main
 struct GitAutoSyncApp: App {
-    @State private var appState = AppState()
+    @State private var appState: AppState
     @State private var didFirstLaunchOpen = false
 
     init() {
+        let state = AppState()
+        _appState = State(initialValue: state)
+        NotificationManager.shared.onOpenRepo = { path in
+            state.showDashboard(repo: path)
+        }
         NotificationManager.shared.requestPermission()
     }
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarLauncher(appState: appState, didFirstLaunchOpen: $didFirstLaunchOpen)
+            MenuBarLauncher(appState: appState)
         } label: {
-            MenuBarIcon(appState: appState)
+            MenuBarLabel(appState: appState, didFirstLaunchOpen: $didFirstLaunchOpen)
         }
         .menuBarExtraStyle(.menu)
 
@@ -24,28 +30,108 @@ struct GitAutoSyncApp: App {
         .defaultSize(width: 900, height: 560)
         .windowToolbarStyle(.unified)
         .commands {
-            CommandGroup(replacing: .newItem) {}
+            AppCommands(appState: appState)
         }
     }
 }
 
-private struct MenuBarLauncher: View {
+private struct MenuBarLabel: View {
     let appState: AppState
     @Binding var didFirstLaunchOpen: Bool
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        MenuBarView(appState: appState)
+        MenuBarIcon(appState: appState)
+            .onAppear(perform: register)
             .task {
-                if !didFirstLaunchOpen {
-                    didFirstLaunchOpen = true
-                    let seen = UserDefaults.standard.bool(forKey: "gas.didOnboarding")
-                    if !seen {
-                        UserDefaults.standard.set(true, forKey: "gas.didOnboarding")
-                        openWindow(id: "dashboard")
-                        NSApp.activate(ignoringOtherApps: true)
-                    }
+                register()
+                guard !didFirstLaunchOpen else { return }
+                didFirstLaunchOpen = true
+                if !UserDefaults.standard.bool(forKey: "gas.didOnboarding") {
+                    UserDefaults.standard.set(true, forKey: "gas.didOnboarding")
+                    appState.showDashboard()
                 }
             }
+    }
+
+    private func register() {
+        appState.openDashboardWindow = { openWindow(id: "dashboard") }
+    }
+}
+
+private struct MenuBarLauncher: View {
+    let appState: AppState
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        MenuBarView(appState: appState)
+            .task {
+                appState.openDashboardWindow = { openWindow(id: "dashboard") }
+                appState.refreshLaunchAtLogin()
+            }
+    }
+}
+
+private struct AppCommands: Commands {
+    let appState: AppState
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            AddRepositoryCommand(appState: appState)
+        }
+        CommandGroup(replacing: .textEditing) {
+            Button("Find Repository") { appState.requestFocusSearch() }
+                .keyboardShortcut("f", modifiers: [.command])
+        }
+        CommandMenu("Repository") {
+            RepositoryCommands(appState: appState)
+        }
+    }
+}
+
+private struct AddRepositoryCommand: View {
+    let appState: AppState
+
+    var body: some View {
+        Button("Add Repository…") { appState.requestAddRepository() }
+            .keyboardShortcut("n", modifiers: [.command])
+            .disabled(appState.connection != .connected)
+    }
+}
+
+private struct RepositoryCommands: View {
+    let appState: AppState
+
+    var body: some View {
+        let repo = appState.selectedRepo
+        let connected = appState.connection == .connected
+
+        Button("Sync Now") { Task { await appState.syncSelected() } }
+            .keyboardShortcut("r", modifiers: [.command])
+            .disabled(!connected || repo == nil || repo?.paused == true || repo?.watching == false)
+
+        Button("Sync All") { Task { await appState.syncAll() } }
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+            .disabled(!connected || appState.repos.isEmpty)
+
+        Divider()
+
+        Button(repo?.paused == true ? "Resume" : "Pause") { Task { await appState.togglePauseSelected() } }
+            .keyboardShortcut(".", modifiers: [.command])
+            .disabled(!connected || repo == nil)
+
+        Divider()
+
+        Button("Remove from Git Auto Sync…") { removeSelected() }
+            .keyboardShortcut(.delete, modifiers: [.command])
+            .disabled(repo == nil)
+    }
+
+    private func removeSelected() {
+        if NSApp.keyWindow?.firstResponder is NSText {
+            NSApp.sendAction(#selector(NSResponder.deleteToBeginningOfLine(_:)), to: nil, from: nil)
+            return
+        }
+        appState.requestRemoveSelected()
     }
 }

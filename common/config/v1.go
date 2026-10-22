@@ -1,10 +1,12 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 
+	"github.com/GitJournal/git-auto-sync/common"
 	"github.com/kirsle/configdir"
 	"github.com/ztrue/tracerr"
 )
@@ -14,56 +16,74 @@ type ConfigV1 struct {
 	Envs  []string `json:"envs"`
 }
 
-func ReadV1() (*ConfigV1, error) {
+func configFilePath() (string, error) {
 	configPath := configdir.LocalConfig("git-auto-sync")
-	err := configdir.MakePath(configPath)
+	if err := configdir.MakePath(configPath); err != nil {
+		return "", tracerr.Wrap(err)
+	}
+	return filepath.Join(configPath, "config.json"), nil
+}
+
+func ReadV1() (*ConfigV1, error) {
+	configFile, err := configFilePath()
+	if err != nil {
+		return nil, err
+	}
+
+	config := ConfigV1{}
+	data, err := os.ReadFile(configFile)
+	if os.IsNotExist(err) {
+		return &config, nil
+	}
 	if err != nil {
 		return nil, tracerr.Wrap(err)
 	}
-
-	configFile := filepath.Join(configPath, "config.json")
-	config := ConfigV1{}
-
-	if _, err = os.Stat(configFile); os.IsNotExist(err) {
+	if len(bytes.TrimSpace(data)) == 0 {
 		return &config, nil
-	} else {
-		// Load the existing file.
-		fh, err := os.Open(configFile)
-		if err != nil {
-			return nil, tracerr.Wrap(err)
-		}
-		defer fh.Close()
-
-		decoder := json.NewDecoder(fh)
-		err = decoder.Decode(&config)
-		if err != nil {
-			return nil, tracerr.Wrap(err)
-		}
 	}
 
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, tracerr.Wrap(err)
+	}
+
+	config.Repos = NormalizeRepos(config.Repos)
 	return &config, nil
 }
 
 func WriteV1(config *ConfigV1) error {
-	configPath := configdir.LocalConfig("git-auto-sync")
-	err := configdir.MakePath(configPath)
+	configFile, err := configFilePath()
+	if err != nil {
+		return err
+	}
+
+	out := *config
+	out.Repos = NormalizeRepos(config.Repos)
+
+	data, err := json.Marshal(&out)
 	if err != nil {
 		return tracerr.Wrap(err)
 	}
+	data = append(data, '\n')
 
-	configFile := filepath.Join(configPath, "config.json")
-
-	fh, err := os.Create(configFile)
-	if err != nil {
+	if err := common.WriteFileAtomic(configFile, data, 0o644); err != nil {
 		return tracerr.Wrap(err)
 	}
-	defer fh.Close()
-
-	encoder := json.NewEncoder(fh)
-	err = encoder.Encode(&config)
-	if err != nil {
-		return tracerr.Wrap(err)
-	}
-
 	return nil
+}
+
+func NormalizeRepos(repos []string) []string {
+	out := make([]string, 0, len(repos))
+	seen := make(map[string]bool, len(repos))
+	for _, rp := range repos {
+		if rp == "" {
+			continue
+		}
+		clean := filepath.Clean(rp)
+		if seen[clean] {
+			continue
+		}
+		seen[clean] = true
+		out = append(out, clean)
+	}
+	return out
 }

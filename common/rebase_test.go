@@ -1,6 +1,8 @@
 package common
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	git "gopkg.in/src-d/go-git.v4"
@@ -12,7 +14,7 @@ import (
 func Test_RebaseNothing(t *testing.T) {
 	repoConfig := PrepareMultiFixtures(t, "rebase_nothing", []string{"rebase_parent"})
 
-	err := rebase(repoConfig)
+	err := runRebase(t, repoConfig)
 	assert.NilError(t, err)
 
 	r, err := git.PlainOpen(repoConfig.RepoPath)
@@ -28,7 +30,7 @@ func Test_RebaseNothing(t *testing.T) {
 func Test_RebaseLocalCommits(t *testing.T) {
 	repoConfig := PrepareMultiFixtures(t, "rebase_local_commits", []string{"rebase_parent"})
 
-	err := rebase(repoConfig)
+	err := runRebase(t, repoConfig)
 	assert.NilError(t, err)
 
 	r, err := git.PlainOpen(repoConfig.RepoPath)
@@ -44,7 +46,7 @@ func Test_RebaseLocalCommits(t *testing.T) {
 func Test_RebaseRemoteCommits(t *testing.T) {
 	repoConfig := PrepareMultiFixtures(t, "rebase_remote_commits", []string{"rebase_parent"})
 
-	err := rebase(repoConfig)
+	err := runRebase(t, repoConfig)
 	assert.NilError(t, err)
 
 	r, err := git.PlainOpen(repoConfig.RepoPath)
@@ -60,7 +62,7 @@ func Test_RebaseRemoteCommits(t *testing.T) {
 func Test_RebaseBothCommitsNoConflict(t *testing.T) {
 	repoConfig := PrepareMultiFixtures(t, "rebase_both_commits", []string{"rebase_parent"})
 
-	err := rebase(repoConfig)
+	err := runRebase(t, repoConfig)
 	assert.NilError(t, err)
 
 	r, err := git.PlainOpen(repoConfig.RepoPath)
@@ -84,11 +86,29 @@ func Test_RebaseBothCommitsConflict(t *testing.T) {
 	origHead, err := r.Head()
 	assert.NilError(t, err)
 
-	err = rebase(repoConfig)
-	assert.Equal(t, err, errRebaseFailed)
+	err = runRebase(t, repoConfig)
+	assert.Assert(t, errors.Is(err, errRebaseFailed))
+	var conflict *rebaseConflictError
+	assert.Assert(t, errors.As(err, &conflict))
+	assert.Equal(t, conflict.Head, origHead.Hash().String())
+	assert.Assert(t, conflict.Upstream != "")
+	assert.Assert(t, len(conflict.Files) > 0)
+
+	info, err := readRepoInfo(context.Background(), repoConfig)
+	assert.NilError(t, err)
+	rebasing, err := isRebasing(info.GitDir)
+	assert.NilError(t, err)
+	assert.Assert(t, !rebasing)
 
 	newHead, err := r.Head()
 	assert.NilError(t, err)
 
 	assert.Check(t, newHead.Hash() == origHead.Hash())
+}
+
+func runRebase(t *testing.T, repoConfig RepoConfig) error {
+	t.Helper()
+	info, err := readRepoInfo(context.Background(), repoConfig)
+	assert.NilError(t, err)
+	return rebase(context.Background(), repoConfig, info, false)
 }

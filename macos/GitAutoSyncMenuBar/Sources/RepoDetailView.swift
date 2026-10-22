@@ -14,21 +14,20 @@ struct RepoDetailView: View {
     @State private var tab: DetailTab = .overview
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
             RepoHeader(repo: repo)
-                .frame(height: 88, alignment: .top)
                 .padding(.horizontal, 24)
                 .padding(.top, 18)
-                .padding(.bottom, 12)
+                .padding(.bottom, 14)
 
-            Picker("", selection: $tab) {
+            Picker("Section", selection: $tab) {
                 ForEach(DetailTab.allCases) { t in
                     Text(t.rawValue).tag(t)
                 }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(maxWidth: 420, alignment: .leading)
+            .fixedSize()
             .padding(.horizontal, 24)
             .padding(.bottom, 12)
 
@@ -37,7 +36,7 @@ struct RepoDetailView: View {
             Group {
                 switch tab {
                 case .overview:
-                    OverviewTab(appState: appState, repo: repo)
+                    OverviewTab(appState: appState, repo: repo) { tab = .timeline }
                 case .timeline:
                     TimelineTab(appState: appState, repo: repo)
                 case .settings:
@@ -72,165 +71,205 @@ private struct RepoHeader: View {
     let repo: RepoState
 
     var body: some View {
+        let style = StatusStyle.of(repo)
         HStack(alignment: .center, spacing: 14) {
-            StatusBadge(status: repo.status, paused: repo.paused, conflict: repo.conflict)
+            StatusBadge(repo: repo, glyphSize: 15)
                 .frame(width: 38, height: 38)
+                .accessibilityHidden(true)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
                     Text(repo.name)
                         .font(.system(size: 20, weight: .semibold))
-                    if repo.paused {
-                        Pill(text: "paused", color: .gray)
-                    } else if repo.conflict {
-                        Pill(text: "conflict", color: .orange)
-                    } else if repo.status == "preflight" {
-                        Pill(text: "blocked", color: .yellow)
-                    } else if repo.status == "syncing" {
-                        Pill(text: "syncing", color: .blue)
-                    } else if repo.status == "ok" {
-                        Pill(text: "synced", color: .green)
-                    } else if repo.status == "error" {
-                        Pill(text: "error", color: .red)
-                    }
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help(repo.name)
+                    StatusPill(style: style)
+                        .fixedSize()
                 }
                 HStack(spacing: 10) {
                     if let branch = repo.branch, !branch.isEmpty {
                         Label(branch, systemImage: "arrow.triangle.branch")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(branch)
+                            .accessibilityLabel("Branch \(branch)")
+                    } else {
+                        Label("No branch", systemImage: "arrow.triangle.branch")
                     }
                     if let upstream = repo.upstream, !upstream.isEmpty {
-                        Text("↦ \(upstream)")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.tertiary)
+                        Text("→ \(upstream)")
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help("Tracking \(upstream)")
+                            .accessibilityLabel("Tracking \(upstream)")
                     }
                     if repo.ahead > 0 {
                         Label("\(repo.ahead) ahead", systemImage: "arrow.up")
-                            .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.blue)
+                            .fixedSize()
                     }
                     if repo.behind > 0 {
                         Label("\(repo.behind) behind", systemImage: "arrow.down")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(StatusStyle.of(.conflict).color)
+                            .fixedSize()
                     }
                 }
-                Text(abbreviatePath(repo.path))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                Text(PathFormat.abbreviate(repo.path))
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.quaternary)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .truncationMode(.middle)
                     .textSelection(.enabled)
+                    .help(repo.path)
             }
-            Spacer()
+            Spacer(minLength: 0)
         }
-    }
-
-    private func abbreviatePath(_ path: String) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        if path.hasPrefix(home) { return "~" + path.dropFirst(home.count) }
-        return path
-    }
-}
-
-private struct Pill: View {
-    let text: String
-    let color: Color
-    var body: some View {
-        Text(text.uppercased())
-            .font(.system(size: 9, weight: .bold, design: .monospaced))
-            .tracking(0.5)
-            .foregroundStyle(color)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(
-                Capsule().fill(color.opacity(0.15))
-            )
-            .overlay(
-                Capsule().strokeBorder(color.opacity(0.35), lineWidth: 0.5)
-            )
     }
 }
 
 private struct OverviewTab: View {
     let appState: AppState
     let repo: RepoState
+    let onShowTimeline: () -> Void
 
     var body: some View {
+        let events = appState.eventsFor(repo: repo.path)
         TabScroll {
-            if repo.conflict {
-                ConflictBanner(repo: repo)
-            } else if let pf = repo.preflight, !pf.isEmpty {
-                PreflightBanner(repo: repo, message: pf)
-            } else if let err = repo.lastError, !err.isEmpty, repo.status == "error" {
-                ErrorBanner(message: err) {
-                    Task { await appState.syncNow(repo.path) }
-                }
+            if let issue = RepoIssue.of(repo, events: events) {
+                RepoIssueBanner(appState: appState, repo: repo, issue: issue)
             }
 
-            StatCardsRow(repo: repo)
+            StatCardsGrid(repo: repo)
 
             if repo.batchPending == true, let due = repo.batchDue {
                 BatchPendingCard(due: due)
             }
 
-            RecentActivityCard(events: Array(appState.eventsFor(repo: repo.path).suffix(5).reversed()))
+            RecentActivityCard(
+                events: Array(events.suffix(5).reversed()),
+                hasMore: events.count > 5,
+                onShowAll: onShowTimeline
+            )
         }
     }
 }
 
-private struct StatCardsRow: View {
+private struct StatCardsGrid: View {
     let repo: RepoState
 
     var body: some View {
-        HStack(spacing: 12) {
-            StatCard(
-                title: "Last sync",
-                value: repo.lastSync.map { AnyView(LiveRelativeText(date: $0).font(.system(size: 18, weight: .semibold))) } ?? AnyView(Text("—").font(.system(size: 18, weight: .semibold))),
-                detail: repo.lastActivity ?? (repo.watching ? "monitoring" : "idle"),
-                icon: "clock"
-            )
-            StatCard(
-                title: "Branch",
-                value: AnyView(Text(repo.branch ?? "—").font(.system(size: 18, weight: .semibold)).lineLimit(1)),
-                detail: repo.upstream ?? "no upstream",
-                icon: "arrow.triangle.branch"
-            )
-            StatCard(
-                title: "Divergence",
-                value: AnyView(Text("\(repo.ahead) ↑  \(repo.behind) ↓").font(.system(size: 18, weight: .semibold))),
-                detail: repo.ahead == 0 && repo.behind == 0 ? "in sync" : "out of sync",
-                icon: "arrow.up.arrow.down"
-            )
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                lastChangeCard
+                lastCheckCard
+                branchCard
+                divergenceCard
+            }
+            Grid(horizontalSpacing: 12, verticalSpacing: 12) {
+                GridRow {
+                    lastChangeCard
+                    lastCheckCard
+                }
+                GridRow {
+                    branchCard
+                    divergenceCard
+                }
+            }
+        }
+    }
+
+    private var lastChangeCard: some View {
+        StatCard(title: "Last change", detail: changeDetail, icon: "pencil.and.outline") {
+            RelativeValue(date: repo.lastChange)
+        }
+    }
+
+    private var lastCheckCard: some View {
+        StatCard(title: "Last check", detail: checkDetail, icon: "clock") {
+            RelativeValue(date: repo.lastCheck ?? repo.lastSync)
+        }
+    }
+
+    private var branchCard: some View {
+        StatCard(title: "Branch", detail: repo.upstream.flatMap { $0.isEmpty ? nil : $0 } ?? "No upstream", icon: "arrow.triangle.branch") {
+            Text(repo.branch.flatMap { $0.isEmpty ? nil : $0 } ?? "—")
+                .truncationMode(.middle)
+        }
+    }
+
+    private var divergenceCard: some View {
+        StatCard(title: "Divergence", detail: divergenceDetail, icon: "arrow.up.arrow.down") {
+            Text("\(repo.ahead) ↑").foregroundStyle(repo.ahead > 0 ? Color.blue : Color.primary)
+            + Text("  ")
+            + Text("\(repo.behind) ↓").foregroundStyle(repo.behind > 0 ? StatusStyle.of(.conflict).color : Color.primary)
+        }
+        .accessibilityLabel("Divergence: \(repo.ahead) ahead, \(repo.behind) behind")
+    }
+
+    private var changeDetail: String {
+        guard repo.lastChange != nil else { return "No changes yet" }
+        return (repo.lastActivity.flatMap { $0.isEmpty ? nil : $0 } ?? "Committed or synced").sentenceCased
+    }
+
+    private var checkDetail: String {
+        if repo.paused { return "Paused" }
+        if !repo.watching { return "Not watching" }
+        if let poll = repo.pollInterval, poll > 0 { return "Polls every \(Durations.human(poll))" }
+        return "Watching for changes"
+    }
+
+    private var divergenceDetail: String {
+        if repo.ahead == 0 && repo.behind == 0 { return "In sync" }
+        var parts: [String] = []
+        if repo.ahead > 0 { parts.append("\(repo.ahead.formatted()) to push") }
+        if repo.behind > 0 { parts.append("\(repo.behind.formatted()) to pull") }
+        return parts.joined(separator: ", ").sentenceCased
+    }
+}
+
+private struct RelativeValue: View {
+    let date: Date?
+
+    var body: some View {
+        if let date {
+            LiveRelativeText(date: date)
+        } else {
+            Text("—")
         }
     }
 }
 
-private struct StatCard: View {
+private struct StatCard<Value: View>: View {
     let title: String
-    let value: AnyView
     let detail: String
     let icon: String
+    @ViewBuilder let value: Value
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: icon)
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                Text(title.uppercased())
-                    .font(.system(size: 10, weight: .semibold))
-                    .tracking(0.6)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
             }
             value
+                .font(.system(size: 18, weight: .semibold))
                 .lineLimit(1)
             Text(detail)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                .truncationMode(.middle)
+                .help(detail)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(minWidth: 130, maxWidth: .infinity, alignment: .leading)
         .padding(14)
         .background(
             RoundedRectangle(cornerRadius: 10)
@@ -240,189 +279,23 @@ private struct StatCard: View {
             RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5)
         )
-    }
-}
-
-private struct ConflictBanner: View {
-    let repo: RepoState
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                Text("Merge conflict on rebase")
-                    .font(.system(size: 13, weight: .semibold))
-                Spacer()
-                Button("Open in Finder") {
-                    NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: repo.path)
-                }
-                .controlSize(.small)
-                Button("Open in Terminal") {
-                    let p = Process()
-                    p.launchPath = "/usr/bin/open"
-                    p.arguments = ["-a", "Terminal", repo.path]
-                    try? p.run()
-                }
-                .controlSize(.small)
-            }
-            if let files = repo.conflictFiles, !files.isEmpty {
-                Text("Conflicting files")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(files, id: \.self) { f in
-                        HStack(spacing: 6) {
-                            Image(systemName: "doc.text.fill")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.orange.opacity(0.7))
-                            Text(f)
-                                .font(.system(size: 11, design: .monospaced))
-                                .textSelection(.enabled)
-                        }
-                    }
-                }
-            }
-            Text("Rebase aborted to keep your work safe. Resolve in the terminal, commit, and the daemon resumes on the next change.")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-            HStack(spacing: 6) {
-                Button("Copy resolve commands") {
-                    let cmd = "cd \"\(repo.path)\" && git status\n# fix conflicts, then:\n# git add -A && git rebase --continue"
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(cmd, forType: .string)
-                }
-                .controlSize(.small)
-            }
-        }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.orange.opacity(0.1))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(Color.orange.opacity(0.4), lineWidth: 0.7)
-        )
-    }
-}
-
-private struct PreflightBanner: View {
-    let repo: RepoState
-    let message: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "hand.raised.fill")
-                .foregroundStyle(.yellow)
-                .padding(.top, 1)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Sync paused — repo state needs attention")
-                    .font(.system(size: 13, weight: .semibold))
-                Text(message)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button("Open in Finder") {
-                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: repo.path)
-            }
-            .controlSize(.small)
-        }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.yellow.opacity(0.08))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(Color.yellow.opacity(0.35), lineWidth: 0.7)
-        )
-    }
-}
-
-private struct ErrorBanner: View {
-    let message: String
-    let onRetry: () -> Void
-    @State private var expanded = false
-
-    private var shortMessage: String { ErrorClean.short(message) }
-    private var hasDetails: Bool { message.count > shortMessage.count }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "exclamationmark.octagon.fill")
-                    .foregroundStyle(.red)
-                    .padding(.top, 1)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Last sync failed")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text(shortMessage)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .lineLimit(expanded ? nil : 3)
-                }
-                Spacer()
-                Button("Retry", action: onRetry)
-                    .controlSize(.small)
-            }
-            HStack(spacing: 8) {
-                if hasDetails {
-                    Button(expanded ? "Hide details" : "Show details") {
-                        withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
-                    }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                }
-                Button("Copy") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(message, forType: .string)
-                }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                Spacer()
-            }
-            if expanded {
-                ScrollView {
-                    Text(message)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
-                }
-                .frame(maxHeight: 180)
-                .background(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(Color.black.opacity(0.06))
-                )
-            }
-        }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.red.opacity(0.08))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(Color.red.opacity(0.3), lineWidth: 0.7)
-        )
+        .accessibilityElement(children: .combine)
     }
 }
 
 private struct BatchPendingCard: View {
     let due: Date
-    @State private var now = Date()
 
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "hourglass")
                 .foregroundStyle(.blue)
-            Text("Batching changes — next commit in \(timeRemaining)")
-                .font(.system(size: 12))
-                .foregroundStyle(.primary)
+                .accessibilityHidden(true)
+            TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                Text("Batching changes: next commit in \(Durations.countdown(to: due, now: ctx.date) ?? "a moment")")
+                    .font(.system(size: 12))
+                    .monospacedDigit()
+            }
             Spacer()
         }
         .padding(12)
@@ -430,31 +303,31 @@ private struct BatchPendingCard: View {
             RoundedRectangle(cornerRadius: 10)
                 .fill(Color.blue.opacity(0.08))
         )
-        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { t in now = t }
-    }
-
-    private var timeRemaining: String {
-        let remaining = max(0, Int(due.timeIntervalSince(now)))
-        if remaining <= 0 { return "now" }
-        if remaining < 60 { return "\(remaining)s" }
-        let m = remaining / 60
-        let s = remaining % 60
-        return "\(m)m \(s)s"
     }
 }
 
 private struct RecentActivityCard: View {
     let events: [DaemonEvent]
+    let hasMore: Bool
+    let onShowAll: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Recent activity".uppercased())
-                .font(.system(size: 10, weight: .semibold))
-                .tracking(0.6)
-                .foregroundStyle(.tertiary)
+            HStack(alignment: .firstTextBaseline) {
+                Text("Recent activity")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer()
+                if hasMore {
+                    Button("Show All", action: onShowAll)
+                        .buttonStyle(.link)
+                        .font(.system(size: 11))
+                }
+            }
 
             if events.isEmpty {
-                Text("No recent activity")
+                Text("Nothing yet. Commits, pulls, and pushes for this repository show up here.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -484,39 +357,28 @@ private struct InlineEventRow: View {
     let event: DaemonEvent
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            EventTypeBadge(type: event.type, color: eventColor(event.type))
-            VStack(alignment: .leading, spacing: 2) {
-                if let msg = event.message, !msg.isEmpty {
-                    Text(firstLine(ErrorClean.short(msg)))
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            EventTypeBadge(type: event.type)
+            if let msg = event.message, !msg.isEmpty {
+                Text(firstLine(ErrorClean.short(msg)))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
-            Spacer()
+            Spacer(minLength: 8)
             LiveRelativeText(date: event.date)
-                .font(.system(size: 10))
-                .foregroundStyle(.quaternary)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
         }
         .padding(.vertical, 6)
+        .accessibilityElement(children: .combine)
     }
 
     private func firstLine(_ s: String) -> String {
-        s.split(separator: "\n").first.map(String.init) ?? s
-    }
-}
-
-private func eventColor(_ type: String) -> Color {
-    switch type {
-    case "commit": return .blue
-    case "push": return .green
-    case "synced": return .mint
-    case "error": return .red
-    case "conflict": return .orange
-    case "preflight": return .yellow
-    case "state": return .secondary
-    default: return .secondary
+        let lines = s.split(separator: "\n")
+        guard let first = lines.first else { return s }
+        return lines.count > 1 ? "\(first) (+\(lines.count - 1) more)" : String(first)
     }
 }
 
@@ -524,106 +386,16 @@ private struct TimelineTab: View {
     let appState: AppState
     let repo: RepoState
     @State private var filter: EventFilter = .all
-
-    private var events: [DaemonEvent] {
-        appState.eventsFor(repo: repo.path).filter { filter.matches($0) }.reversed()
-    }
-
-    private var grouped: [(label: String, events: [DaemonEvent])] {
-        let cal = Calendar.current
-        var todayList: [DaemonEvent] = []
-        var yesterdayList: [DaemonEvent] = []
-        var earlierGroups: [Date: [DaemonEvent]] = [:]
-        for e in events {
-            if cal.isDateInToday(e.date) {
-                todayList.append(e)
-            } else if cal.isDateInYesterday(e.date) {
-                yesterdayList.append(e)
-            } else {
-                let day = cal.startOfDay(for: e.date)
-                earlierGroups[day, default: []].append(e)
-            }
-        }
-        var out: [(String, [DaemonEvent])] = []
-        if !todayList.isEmpty { out.append(("Today", todayList)) }
-        if !yesterdayList.isEmpty { out.append(("Yesterday", yesterdayList)) }
-        let df = DateFormatter()
-        df.dateFormat = "EEEE, MMM d"
-        for day in earlierGroups.keys.sorted(by: >) {
-            out.append((df.string(from: day), earlierGroups[day] ?? []))
-        }
-        return out
-    }
+    @State private var cache = TimelineCache()
 
     var body: some View {
-        TabScroll {
-            HStack(spacing: 6) {
-                ForEach(EventFilter.allCases, id: \.self) { f in
-                    FilterTab(
-                        label: f.rawValue,
-                        count: appState.eventsFor(repo: repo.path).filter { f.matches($0) }.count,
-                        isSelected: filter == f
-                    ) { filter = f }
-                }
-                Spacer()
-            }
-
-            if events.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "tray")
-                        .font(.system(size: 28, weight: .light))
-                        .foregroundStyle(.tertiary)
-                    Text("No events")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text("Activity for \(repo.name) will appear here.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 60)
-            } else {
-                ForEach(Array(grouped.enumerated()), id: \.offset) { _, group in
-                    TimelineGroup(label: group.label, count: group.events.count, events: group.events)
-                }
-            }
-        }
-    }
-}
-
-private struct TimelineGroup: View {
-    let label: String
-    let count: Int
-    let events: [DaemonEvent]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(label.uppercased())
-                    .font(.system(size: 10, weight: .semibold))
-                    .tracking(0.7)
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                Text("\(count)")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.quaternary)
-            }
-            VStack(spacing: 0) {
-                ForEach(Array(events.enumerated()), id: \.element.id) { idx, ev in
-                    if idx > 0 {
-                        Divider()
-                    }
-                    EventRow(event: ev)
-                }
-            }
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color(NSColor.controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5)
-            )
+        let snapshot = cache.snapshot(for: appState.eventsFor(repo: repo.path), filter: filter)
+        EventTimelineList(
+            snapshot: snapshot,
+            emptyMessage: filter == .all ? "Commits, pulls, pushes, and problems for \(repo.name) show up here." : "No \(filter.rawValue.lowercased()) to show.",
+            showRepo: false
+        ) {
+            EventFilterBar(counts: snapshot.counts, filter: $filter)
         }
     }
 }
@@ -636,6 +408,8 @@ private struct SettingsTab: View {
     @State private var batchWindow: Int = 0
     @State private var saving = false
     @State private var savedAt: Date? = nil
+    @State private var saveError: String? = nil
+    @AppStorage(TerminalApp.storageKey) private var terminalApp: TerminalApp = .terminal
 
     private let pollPresets: [(label: String, seconds: Int)] = [
         ("1m", 60), ("5m", 300), ("10m", 600), ("30m", 1800), ("1h", 3600)
@@ -651,53 +425,68 @@ private struct SettingsTab: View {
                     SettingsRow(
                         label: "Poll interval",
                         help: "How often the daemon syncs even without file changes.",
-                        valueLabel: humanDuration(pollInterval)
+                        valueLabel: Durations.human(pollInterval)
                     ) {
                         VStack(alignment: .leading, spacing: 8) {
                             PresetChips(
                                 items: pollPresets.map { ($0.label, $0.seconds) },
                                 selected: pollInterval
                             ) { pollInterval = $0 }
-                            Stepper(value: $pollInterval, in: 30...86400, step: 30) {
-                                Text("\(pollInterval) sec")
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .labelsHidden()
+                            SecondsStepper(
+                                label: "Poll interval in seconds",
+                                value: $pollInterval,
+                                range: 30...86400,
+                                step: 30
+                            )
                         }
                     }
                     Divider()
                     SettingsRow(
                         label: "Batch window",
-                        help: "Wait this long after a change before committing. 0 = commit every change.",
-                        valueLabel: batchWindow == 0 ? "Off" : humanDuration(batchWindow)
+                        help: "Wait this long after a change before committing. Off commits every change.",
+                        valueLabel: batchWindow == 0 ? "Off" : Durations.human(batchWindow)
                     ) {
                         VStack(alignment: .leading, spacing: 8) {
                             PresetChips(
                                 items: batchPresets.map { ($0.label, $0.seconds) },
                                 selected: batchWindow
                             ) { batchWindow = $0 }
-                            Stepper(value: $batchWindow, in: 0...86400, step: 15) {
-                                Text(batchWindow == 0 ? "off" : "\(batchWindow) sec")
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .labelsHidden()
+                            SecondsStepper(
+                                label: "Batch window in seconds",
+                                value: $batchWindow,
+                                range: 0...86400,
+                                step: 15,
+                                zeroText: "Off"
+                            )
                         }
                     }
                 }
 
-                HStack {
-                    Button(saving ? "Saving…" : "Save Settings") {
+                HStack(spacing: 8) {
+                    Button {
                         Task { await save() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            if saving {
+                                ProgressView().controlSize(.small)
+                            }
+                            Text(saving ? "Saving…" : "Save Settings")
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(saving || !hasChanges)
+                    .keyboardShortcut("s", modifiers: [.command])
 
                     Button("Revert") { syncFromRepo() }
-                        .disabled(!hasChanges)
+                        .disabled(saving || !hasChanges)
 
-                    if let savedAt {
+                    if let saveError {
+                        Label(saveError, systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.red)
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                    } else if let savedAt {
                         LiveRelativeText(date: savedAt, prefix: "Saved ")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
@@ -706,41 +495,120 @@ private struct SettingsTab: View {
                     Spacer()
                 }
 
-                Text("Stored in this repo's git config under [auto-sync]. The watcher restarts after saving.")
+                Text("Saved to this repository's git config under [auto-sync]. Syncing restarts with the new values right away.")
                     .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
+
+                GitConfigCard(repo: repo)
+
+                SettingsCard {
+                    HStack(alignment: .center) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Open in Terminal uses").font(.system(size: 13, weight: .semibold))
+                            Text("Applies to every repository.").font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Picker("Terminal app", selection: $terminalApp) {
+                            ForEach(TerminalApp.allCases) { app in
+                                Text(app.isInstalled ? app.title : "\(app.title) (not installed)").tag(app)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                    .padding(14)
+                }
             }
             .frame(maxWidth: 620, alignment: .leading)
         }
         .onAppear { syncFromRepo() }
-        .onChange(of: repo.path) { _, _ in syncFromRepo() }
+        .onChange(of: repo.path) { _, _ in
+            syncFromRepo()
+            savedAt = nil
+            saveError = nil
+        }
         .onChange(of: repo.pollInterval) { _, _ in syncFromRepo() }
         .onChange(of: repo.batchWindow) { _, _ in syncFromRepo() }
+        .onChange(of: pollInterval) { _, _ in saveError = nil }
+        .onChange(of: batchWindow) { _, _ in saveError = nil }
     }
 
     private var hasChanges: Bool {
         pollInterval != (repo.pollInterval ?? 600) || batchWindow != (repo.batchWindow ?? 0)
     }
 
+    private var draft: RepoSettings {
+        RepoSettings(
+            pollInterval: pollInterval,
+            batchWindow: batchWindow
+        )
+    }
+
     private func syncFromRepo() {
+        guard !saving else { return }
         pollInterval = repo.pollInterval ?? 600
         batchWindow = repo.batchWindow ?? 0
     }
 
     private func save() async {
         saving = true
-        defer { saving = false }
-        await appState.saveSettings(repo.path, pollInterval: pollInterval, batchWindow: batchWindow)
-        savedAt = Date()
+        savedAt = nil
+        saveError = nil
+        let ok = await appState.saveSettings(repo.path, draft)
+        saving = false
+        if ok {
+            savedAt = Date()
+        } else if let notice = appState.notice, notice.isError {
+            saveError = notice.text
+        } else {
+            saveError = "The daemon couldn't save these settings."
+        }
+    }
+}
+
+private struct GitConfigCard: View {
+    let repo: RepoState
+
+    private var configText: String {
+        var lines = ["[auto-sync]"]
+        lines.append(repo.pollInterval.map { "\tsyncInterval = \($0)" } ?? "\t# syncInterval not set (default)")
+        lines.append(repo.batchWindow.map { "\tbatchWindow = \($0)" } ?? "\t# batchWindow not set (default)")
+        return lines.joined(separator: "\n")
     }
 
-    private func humanDuration(_ sec: Int) -> String {
-        if sec <= 0 { return "—" }
-        if sec < 60 { return "\(sec)s" }
-        if sec < 3600 { return "\(sec / 60)m" }
-        let h = sec / 3600
-        let m = (sec % 3600) / 60
-        return m == 0 ? "\(h)h" : "\(h)h \(m)m"
+    var body: some View {
+        SettingsCard {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("Git config").font(.system(size: 13, weight: .semibold))
+                    StatusPill(text: "read-only", color: .secondary)
+                    Spacer()
+                    Button {
+                        RepoActions.copy(configText)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Copy git config section")
+                    .accessibilityLabel("Copy git config section")
+                }
+                Text(configText)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.primary.opacity(0.05))
+                    )
+                Text("Effective values reported by the daemon for \(PathFormat.abbreviate(repo.path)).")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(14)
+        }
     }
 }
 
@@ -770,7 +638,36 @@ private struct PresetChips: View {
                         .foregroundStyle(selected == item.1 ? .white : .primary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(item.1 == 0 ? "Off" : Self.spoken(item.1))
+                .accessibilityAddTraits(selected == item.1 ? .isSelected : [])
             }
+        }
+    }
+
+    private static func spoken(_ seconds: Int) -> String {
+        let f = DateComponentsFormatter()
+        f.unitsStyle = .full
+        f.allowedUnits = [.hour, .minute, .second]
+        return f.string(from: TimeInterval(seconds)) ?? "\(seconds) seconds"
+    }
+}
+
+private struct SecondsStepper: View {
+    let label: String
+    @Binding var value: Int
+    let range: ClosedRange<Int>
+    let step: Int
+    var zeroText: String? = nil
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Stepper(label, value: $value, in: range, step: step)
+                .labelsHidden()
+            Text(value == 0 ? (zeroText ?? "0 seconds") : "\(value) seconds")
+                .font(.system(size: 11))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
         }
     }
 }

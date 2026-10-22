@@ -6,23 +6,26 @@ struct DashboardView: View {
     @Bindable var appState: AppState
     @State private var hoveredRepo: String? = nil
     @State private var dropTargeted = false
+    @State private var showAllActivity = false
+    @State private var pendingRemoval: RepoState? = nil
+    @FocusState private var searchFocused: Bool
+
+    private static let allActivityTag = "\u{0}all-activity"
 
     var body: some View {
         NavigationSplitView {
             sidebar
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 340)
         } detail: {
-            if let selected = selectedRepo {
-                RepoDetailView(appState: appState, repo: selected)
-            } else {
-                EmptyDashboard(onAdd: addRepository)
-            }
+            detail
+                .overlay(alignment: .top) { noticeOverlay }
+                .animation(.easeOut(duration: 0.2), value: appState.notice)
         }
         .navigationTitle(navigationTitle)
-        .navigationSubtitle(appState.summary)
+        .navigationSubtitle(navigationSubtitle)
         .toolbar { toolbarContent }
         .onDrop(of: [.fileURL, .folder], isTargeted: $dropTargeted) { providers in
-            handleDrop(providers)
+            RepoActions.handleDrop(providers, appState: appState)
         }
         .overlay {
             if dropTargeted {
@@ -32,10 +35,23 @@ struct DashboardView: View {
             }
         }
         .animation(.easeOut(duration: 0.15), value: dropTargeted)
+        .confirmRemoval(of: $pendingRemoval, appState: appState)
+        .onChange(of: appState.selectedRepoPath) { _, _ in showAllActivity = false }
+        .onChange(of: appState.focusSearchRequest) { _, _ in searchFocused = true }
+        .onChange(of: appState.addRepoRequest) { _, _ in addRepository() }
+        .onChange(of: appState.removeSelectedRequest) { _, _ in
+            if let repo = selectedRepo { pendingRemoval = repo }
+        }
     }
 
     private var navigationTitle: String {
-        selectedRepo?.name ?? "Git Auto Sync"
+        if showAllActivity { return "All Activity" }
+        return selectedRepo?.name ?? "Git Auto Sync"
+    }
+
+    private var navigationSubtitle: String {
+        if !showAllActivity, selectedRepo != nil { return "" }
+        return appState.summary
     }
 
     private var selectedRepo: RepoState? {
@@ -43,13 +59,62 @@ struct DashboardView: View {
         return appState.repos.first { $0.path == path }
     }
 
+    private var listSelection: Binding<String?> {
+        Binding(
+            get: { showAllActivity ? Self.allActivityTag : appState.selectedRepoPath },
+            set: { newValue in
+                if newValue == Self.allActivityTag {
+                    showAllActivity = true
+                } else {
+                    showAllActivity = false
+                    appState.selectedRepoPath = newValue
+                }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        if showAllActivity {
+            AllActivityView(appState: appState)
+        } else if let selected = selectedRepo {
+            RepoDetailView(appState: appState, repo: selected)
+        } else if appState.isDaemonUnavailable {
+            DaemonUnavailableView(appState: appState)
+        } else {
+            EmptyDashboard(onAdd: addRepository)
+        }
+    }
+
+    @ViewBuilder
+    private var noticeOverlay: some View {
+        if let notice = appState.notice {
+            NoticeToast(notice: notice) {
+                if appState.notice?.id == notice.id { appState.notice = nil }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 10)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
     private var sidebar: some View {
         VStack(spacing: 0) {
-            ConnectionBar(state: appState.connectionState, daemonRunning: appState.daemonRunning, summary: appState.summary)
+            if appState.isDaemonUnavailable {
+                if !appState.repos.isEmpty {
+                    DaemonBanner(appState: appState)
+                }
+            } else {
+                ConnectionBar(
+                    connection: appState.displayConnection,
+                    summary: appState.summary,
+                    needsAttention: appState.hasError
+                )
+            }
 
             Divider()
 
-            SidebarSearchField(text: $appState.sidebarSearch)
+            SidebarSearchField(text: $appState.sidebarSearch, focused: $searchFocused)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
 
@@ -58,14 +123,24 @@ struct DashboardView: View {
             } else if appState.filteredRepos.isEmpty {
                 noResultsSidebar
             } else {
-                List(selection: $appState.selectedRepoPath) {
-                    ForEach(appState.filteredRepos) { repo in
-                        SidebarRepoRow(repo: repo, hovered: hoveredRepo == repo.path)
-                            .onHover { hoveredRepo = $0 ? repo.path : (hoveredRepo == repo.path ? nil : hoveredRepo) }
-                            .tag(Optional(repo.path))
-                            .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets(top: 2, leading: 6, bottom: 2, trailing: 6))
-                            .contextMenu { repoContextMenu(repo) }
+                List(selection: listSelection) {
+                    Label("All Activity", systemImage: "list.bullet.rectangle")
+                        .font(.system(size: 13, weight: .medium))
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 4)
+                        .tag(Optional(Self.allActivityTag))
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 2, leading: 6, bottom: 2, trailing: 6))
+
+                    Section("Repositories") {
+                        ForEach(appState.filteredRepos) { repo in
+                            SidebarRepoRow(repo: repo, hovered: hoveredRepo == repo.path)
+                                .onHover { hoveredRepo = $0 ? repo.path : (hoveredRepo == repo.path ? nil : hoveredRepo) }
+                                .tag(Optional(repo.path))
+                                .listRowSeparator(.hidden)
+                                .listRowInsets(EdgeInsets(top: 2, leading: 6, bottom: 2, trailing: 6))
+                                .contextMenu { repoContextMenu(repo) }
+                        }
                     }
                 }
                 .listStyle(.sidebar)
@@ -74,7 +149,12 @@ struct DashboardView: View {
 
             Divider()
 
-            SidebarFooter(appState: appState, selectedPath: selectedRepo?.path, onAdd: addRepository)
+            SidebarFooter(
+                repoCount: appState.repos.count,
+                selected: showAllActivity ? nil : selectedRepo,
+                onAdd: addRepository,
+                onRemove: { pendingRemoval = $0 }
+            )
         }
     }
 
@@ -88,9 +168,9 @@ struct DashboardView: View {
             Text("No repositories")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.secondary)
-            Text("Drop a folder here or click +")
+            Text("Drop a folder here or click + to add one.")
                 .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             Spacer()
         }
@@ -108,8 +188,8 @@ struct DashboardView: View {
             Text("No matches")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
-            Button("Clear search") { appState.sidebarSearch = "" }
-                .buttonStyle(.borderless)
+            Button("Clear Filter") { appState.sidebarSearch = "" }
+                .buttonStyle(.link)
                 .font(.system(size: 11))
             Spacer()
         }
@@ -121,41 +201,40 @@ struct DashboardView: View {
         Button("Sync Now") {
             Task { await appState.syncNow(repo.path) }
         }
-        .disabled(repo.paused || !repo.watching)
+        .disabled(repo.paused || !repo.watching || appState.isDaemonUnavailable)
 
-        if repo.paused {
-            Button("Resume") { Task { await appState.setPaused(repo.path, paused: false) } }
-        } else {
-            Button("Pause") { Task { await appState.setPaused(repo.path, paused: true) } }
+        Group {
+            if repo.paused {
+                Button("Resume") { Task { await appState.setPaused(repo.path, paused: false) } }
+            } else {
+                Button("Pause") { Task { await appState.setPaused(repo.path, paused: true) } }
+            }
         }
+        .disabled(appState.isDaemonUnavailable)
 
         Divider()
 
-        Button("Open in Finder") { reveal(repo.path) }
-        Button("Open in Terminal") { openTerminal(repo.path) }
-        Button("Copy Path") {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(repo.path, forType: .string)
-        }
+        Button("Open in Finder") { RepoActions.reveal(repo.path) }
+        Button("Open in Terminal") { RepoActions.openInTerminal(repo.path) }
+        Button("Copy Path") { RepoActions.copy(repo.path) }
 
         Divider()
 
-        Button("Remove from Git Auto Sync", role: .destructive) {
-            Task { await appState.removeRepo(repo.path) }
+        Button("Remove from Git Auto Sync…", role: .destructive) {
+            pendingRemoval = repo
         }
     }
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
-            if let repo = selectedRepo {
+            if !showAllActivity, let repo = selectedRepo {
                 Button {
                     Task { await appState.syncNow(repo.path) }
                 } label: {
                     Label("Sync Now", systemImage: "arrow.triangle.2.circlepath")
                 }
-                .disabled(repo.paused || !repo.watching)
-                .keyboardShortcut("r", modifiers: [.command])
+                .disabled(repo.paused || !repo.watching || appState.isDaemonUnavailable)
                 .help("Sync \(repo.name) now (⌘R)")
 
                 Button {
@@ -163,72 +242,40 @@ struct DashboardView: View {
                 } label: {
                     Label(repo.paused ? "Resume" : "Pause", systemImage: repo.paused ? "play.fill" : "pause.fill")
                 }
-                .help(repo.paused ? "Resume monitoring" : "Pause monitoring")
+                .disabled(appState.isDaemonUnavailable)
+                .help(repo.paused ? "Resume monitoring (⌘.)" : "Pause monitoring (⌘.)")
 
                 Menu {
-                    Button("Open in Finder") { reveal(repo.path) }
-                    Button("Open in Terminal") { openTerminal(repo.path) }
+                    Button("Open in Finder") { RepoActions.reveal(repo.path) }
+                    Button("Open in Terminal") { RepoActions.openInTerminal(repo.path) }
                     Divider()
-                    Button("Copy Path") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(repo.path, forType: .string)
-                    }
+                    Button("Copy Path") { RepoActions.copy(repo.path) }
                     Divider()
-                    Button("Remove from Git Auto Sync", role: .destructive) {
-                        Task { await appState.removeRepo(repo.path) }
+                    Button("Sync All Repositories") { Task { await appState.syncAll() } }
+                        .disabled(appState.isDaemonUnavailable)
+                    Divider()
+                    Button("Remove from Git Auto Sync…", role: .destructive) {
+                        pendingRemoval = repo
                     }
                 } label: {
                     Label("More", systemImage: "ellipsis.circle")
                 }
+                .help("More actions")
+            } else if showAllActivity {
+                Button {
+                    Task { await appState.syncAll() }
+                } label: {
+                    Label("Sync All", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .disabled(appState.repos.isEmpty || appState.isDaemonUnavailable)
+                .help("Sync all repositories now (⇧⌘R)")
             }
         }
     }
+
 
     private func addRepository() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = true
-        panel.message = "Select a Git repository to monitor"
-        if panel.runModal() == .OK {
-            for url in panel.urls {
-                Task { await appState.addRepo(url.path) }
-            }
-        }
-    }
-
-    private func reveal(_ path: String) {
-        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
-    }
-
-    private func openTerminal(_ path: String) {
-        let task = Process()
-        task.launchPath = "/usr/bin/open"
-        task.arguments = ["-a", "Terminal", path]
-        try? task.run()
-    }
-
-    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
-        var any = false
-        for provider in providers {
-            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-                    var url: URL?
-                    if let data = item as? Data {
-                        url = URL(dataRepresentation: data, relativeTo: nil)
-                    } else if let direct = item as? URL {
-                        url = direct
-                    }
-                    guard let u = url else { return }
-                    let path = u.path
-                    var isDir: ObjCBool = false
-                    guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else { return }
-                    Task { @MainActor in await appState.addRepo(path) }
-                }
-                any = true
-            }
-        }
-        return any
+        RepoActions.addRepositories(appState)
     }
 }
 
@@ -252,17 +299,20 @@ private struct DropOverlay: View {
 
 struct SidebarSearchField: View {
     @Binding var text: String
-    @FocusState private var focused: Bool
+    var focused: FocusState<Bool>.Binding
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
             TextField("Filter", text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
-                .focused($focused)
+                .focused(focused)
+                .accessibilityLabel("Filter repositories")
+                .onExitCommand { focused.wrappedValue = false }
             if !text.isEmpty {
                 Button { text = "" } label: {
                     Image(systemName: "xmark.circle.fill")
@@ -270,6 +320,8 @@ struct SidebarSearchField: View {
                         .foregroundStyle(.tertiary)
                 }
                 .buttonStyle(.plain)
+                .help("Clear filter")
+                .accessibilityLabel("Clear filter")
             }
         }
         .padding(.horizontal, 8)
@@ -280,8 +332,9 @@ struct SidebarSearchField: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(focused ? Color.accentColor.opacity(0.6) : Color.primary.opacity(0.06), lineWidth: 0.5)
+                .strokeBorder(focused.wrappedValue ? Color.accentColor.opacity(0.6) : Color.primary.opacity(0.06), lineWidth: 0.5)
         )
+        .help("Filter repositories (⌘F)")
     }
 }
 
@@ -298,21 +351,20 @@ private struct EmptyDashboard: View {
                     .font(.system(size: 36, weight: .light))
                     .foregroundStyle(.tint)
             }
+            .accessibilityHidden(true)
             Text("Git Auto Sync")
                 .font(.system(size: 24, weight: .semibold))
-            Text("Pick a Git repository and the daemon will quietly keep it committed, rebased, and pushed.")
+            Text("Add a Git repository and it stays committed, pulled, and pushed in the background.")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 380)
-            HStack(spacing: 10) {
-                Button("Add Repository", action: onAdd)
-                    .controlSize(.large)
-                    .buttonStyle(.borderedProminent)
-            }
-            Text("Tip — drop a folder anywhere in this window to add it.")
+            Button("Add Repository…", action: onAdd)
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+            Text("You can also drop a folder anywhere in this window, or press ⌘N.")
                 .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.secondary)
                 .padding(.top, 8)
         }
         .padding(40)
@@ -321,52 +373,46 @@ private struct EmptyDashboard: View {
 }
 
 struct ConnectionBar: View {
-    let state: ConnectionState
-    let daemonRunning: Bool
+    let connection: DaemonConnection
     let summary: String
-    @State private var pulse = false
+    var needsAttention = false
 
     var body: some View {
+        let style = ConnectionStyle.of(connection)
+        let dot = connection == .connected ? (needsAttention ? StatusStyle.of(.conflict).color : style.color) : style.color
         HStack(spacing: 9) {
             ZStack {
                 Circle()
-                    .fill(dotColor.opacity(0.25))
+                    .fill(dot.opacity(0.25))
                     .frame(width: 14, height: 14)
-                    .scaleEffect(pulse && state == .connected ? 1.6 : 1)
-                    .opacity(pulse && state == .connected ? 0 : 0.6)
-                    .animation(.easeOut(duration: 2).repeatForever(autoreverses: false), value: pulse)
                 Circle()
-                    .fill(dotColor)
+                    .fill(dot)
                     .frame(width: 8, height: 8)
             }
+            .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(state == .connected ? "Connected" : (daemonRunning ? "Connecting…" : "Daemon offline"))
-                    .font(.system(size: 12, weight: .semibold))
                 Text(summary)
-                    .font(.system(size: 10))
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                Text(style.title)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             Spacer()
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .onAppear { pulse = true }
-    }
-
-    private var dotColor: Color {
-        switch state {
-        case .connected: return daemonRunning ? .green : .orange
-        case .connecting: return .orange
-        case .disconnected: return .red
-        }
+        .accessibilityElement(children: .combine)
     }
 }
 
 private struct SidebarFooter: View {
-    let appState: AppState
-    let selectedPath: String?
+    let repoCount: Int
+    let selected: RepoState?
     let onAdd: () -> Void
+    let onRemove: (RepoState) -> Void
 
     var body: some View {
         HStack(spacing: 6) {
@@ -375,20 +421,22 @@ private struct SidebarFooter: View {
                     .frame(width: 22, height: 22)
             }
             .buttonStyle(.borderless)
-            .help("Add Repository")
+            .help("Add Repository (⌘N)")
+            .accessibilityLabel("Add Repository")
 
-            if let path = selectedPath {
-                Button(action: { Task { await appState.removeRepo(path) } }) {
+            if let repo = selected {
+                Button(action: { onRemove(repo) }) {
                     Image(systemName: "minus")
                         .frame(width: 22, height: 22)
                 }
                 .buttonStyle(.borderless)
-                .help("Remove selected repository")
+                .help("Remove \(repo.name) from Git Auto Sync (⌘⌫)")
+                .accessibilityLabel("Remove \(repo.name)")
             }
             Spacer()
-            Text("\(appState.repos.count) repo\(appState.repos.count == 1 ? "" : "s")")
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
+            Text("\(repoCount) \(repoCount == 1 ? "repository" : "repositories")")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
         }
         .font(.system(size: 12, weight: .medium))
         .padding(.horizontal, 10)
@@ -401,103 +449,79 @@ struct SidebarRepoRow: View {
     let hovered: Bool
 
     var body: some View {
+        let style = StatusStyle.of(repo)
         HStack(spacing: 10) {
-            StatusBadge(status: repo.status, paused: repo.paused, conflict: repo.conflict)
+            StatusBadge(repo: repo)
                 .frame(width: 22, height: 22)
 
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(repo.name)
-                        .font(.system(size: 13, weight: .semibold))
-                        .lineLimit(1)
-                    if let b = repo.branch, !b.isEmpty {
-                        Text(b)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        nameText.fixedSize()
+                        if let b = repo.branch, !b.isEmpty {
+                            Text(b)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .frame(minWidth: 44, idealWidth: 44, maxWidth: .infinity, alignment: .leading)
+                        }
                     }
+                    nameText
                 }
                 HStack(spacing: 6) {
                     if repo.ahead > 0 {
-                        Label("\(repo.ahead)", systemImage: "arrow.up")
-                            .labelStyle(.titleAndIcon)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.secondary)
+                        Divergence(symbol: "arrow.up", count: repo.ahead)
+                            .accessibilityLabel("\(repo.ahead) ahead")
                     }
                     if repo.behind > 0 {
-                        Label("\(repo.behind)", systemImage: "arrow.down")
-                            .labelStyle(.titleAndIcon)
-                            .font(.system(size: 10, weight: .medium))
+                        Divergence(symbol: "arrow.down", count: repo.behind)
+                            .accessibilityLabel("\(repo.behind) behind")
+                    }
+                    if style.needsAttention || repo.paused || repo.statusValue == .offline {
+                        Text(style.title)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(style.needsAttention ? style.color : Color.secondary)
+                    } else if let changed = repo.lastChange ?? repo.lastSync {
+                        LiveRelativeText(date: changed)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    } else if repo.watching {
+                        Text("Watching")
+                            .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
-                    if let sync = repo.lastSync {
-                        LiveRelativeText(date: sync)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                    } else if repo.watching {
-                        Text("monitoring")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                            .italic()
-                    }
                 }
+                .lineLimit(1)
             }
-            Spacer()
+            Spacer(minLength: 0)
         }
         .padding(.vertical, 4)
         .padding(.horizontal, 4)
+        .help(PathFormat.abbreviate(repo.path))
+        .accessibilityElement(children: .combine)
+    }
+
+    private var nameText: some View {
+        Text(repo.name)
+            .font(.system(size: 13, weight: .semibold))
+            .lineLimit(1)
     }
 }
 
-struct StatusBadge: View {
-    let status: String
-    let paused: Bool
-    let conflict: Bool
-    @State private var spin = 0.0
+private struct Divergence: View {
+    let symbol: String
+    let count: Int
 
     var body: some View {
-        ZStack {
-            Circle()
-                .fill(color.opacity(0.18))
+        HStack(spacing: 1) {
             Image(systemName: symbol)
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(color)
-                .rotationEffect(.degrees(status == "syncing" ? spin : 0))
-                .onAppear {
-                    if status == "syncing" {
-                        withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) {
-                            spin = 360
-                        }
-                    }
-                }
+                .font(.system(size: 8, weight: .bold))
+            Text("\(count)")
+                .font(.system(size: 11, weight: .medium))
+                .monospacedDigit()
         }
-    }
-
-    private var color: Color {
-        if paused { return .gray }
-        if conflict { return .orange }
-        switch status {
-        case "ok": return .green
-        case "syncing": return .blue
-        case "error": return .red
-        case "conflict": return .orange
-        case "preflight": return .yellow
-        case "paused": return .gray
-        default: return .secondary
-        }
-    }
-
-    private var symbol: String {
-        if paused { return "pause.fill" }
-        if conflict { return "exclamationmark.triangle.fill" }
-        switch status {
-        case "ok": return "checkmark"
-        case "syncing": return "arrow.triangle.2.circlepath"
-        case "error": return "xmark"
-        case "conflict": return "exclamationmark.triangle.fill"
-        case "preflight": return "hand.raised.fill"
-        case "paused": return "pause.fill"
-        default: return "circle.dotted"
-        }
+        .foregroundStyle(.secondary)
+        .fixedSize()
     }
 }

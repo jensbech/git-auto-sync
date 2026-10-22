@@ -25,35 +25,44 @@ func (d emptyDaemon) Stop(s service.Service) error {
 	return nil
 }
 
-func NewServiceWithDaemon(daemon service.Interface) (Service, error) {
+const launchdPath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+func serviceConfig(goos, executable string) *service.Config {
 	options := make(service.KeyValue)
 	options["Restart"] = "on-success"
 	options["UserService"] = true
 	options["RunAtLoad"] = true
 
-	ex, err := os.Executable()
-	if err != nil {
-		return Service{}, tracerr.Wrap(err)
-	}
-	exDirPath := filepath.Dir(ex)
-	executablePath := filepath.Join(exDirPath, "git-auto-sync-daemon")
-
 	deps := []string{}
-	if runtime.GOOS == "linux" {
+	var envVars map[string]string
+	switch goos {
+	case "darwin":
+		options["LogDirectory"] = filepath.Dir(LogPath())
+		options["KeepAlive"] = true
+		envVars = map[string]string{"PATH": launchdPath}
+	case "linux":
 		deps = []string{"After=network-online.target syslog.target"}
 	}
 
-	svcConfig := &service.Config{
+	return &service.Config{
 		Name:        "git-auto-sync-daemon",
 		DisplayName: "Git Auto Sync Daemon",
 		Description: "Background Process for Auto Syncing Git Repos",
 
-		Executable:   executablePath,
+		Executable:   filepath.Join(filepath.Dir(executable), "git-auto-sync-daemon"),
 		Dependencies: deps,
+		EnvVars:      envVars,
 		Option:       options,
 	}
+}
 
-	s, err := service.New(daemon, svcConfig)
+func NewServiceWithDaemon(daemon service.Interface) (Service, error) {
+	ex, err := os.Executable()
+	if err != nil {
+		return Service{}, tracerr.Wrap(err)
+	}
+
+	s, err := service.New(daemon, serviceConfig(runtime.GOOS, ex))
 	if err != nil {
 		return Service{}, tracerr.Wrap(err)
 	}
@@ -67,6 +76,12 @@ func NewService() (Service, error) {
 
 func (srv Service) Enable() error {
 	s := srv.Service
+
+	if runtime.GOOS == "darwin" {
+		if err := os.MkdirAll(filepath.Dir(LogPath()), 0o755); err != nil {
+			return tracerr.Wrap(err)
+		}
+	}
 
 	status, err := s.Status()
 	if err != nil {

@@ -1,51 +1,58 @@
 package common
 
 import (
+	"errors"
 	"strings"
 	"time"
 
 	"github.com/ztrue/tracerr"
 )
 
-func push(repoConfig RepoConfig) error {
-	bi, err := fetchBranchInfo(repoConfig.RepoPath)
-	if err != nil {
-		return tracerr.Wrap(err)
-	}
+const pushAttempts = 3
 
-	if bi.UpstreamBranch == "" || bi.UpstreamRemote == "" {
+func (s *syncRun) push() error {
+	info := s.info
+	if !info.hasUpstream() {
 		return nil
 	}
 
-	attempts := 3
-	for i := 1; i <= attempts; i++ {
-		_, err = GitCommand(repoConfig, []string{"push", bi.UpstreamRemote, bi.UpstreamBranch})
+	for i := 1; ; i++ {
+		_, err := GitCommandCtx(s.ctx, s.cfg, []string{"push", info.Remote, "HEAD:" + info.MergeRef})
 		if err == nil {
 			return nil
 		}
 
-		// Inspect error string
-		es := err.Error()
-		retryable := false
-		if strings.Contains(es, "non-fast-forward") ||
-			strings.Contains(es, "cannot lock ref") ||
-			strings.Contains(es, "failed to push some refs") {
-			retryable = true
-		}
-
-		if !retryable || i == attempts {
+		if !isRetryablePush(err) || i == pushAttempts {
 			return tracerr.Wrap(err)
 		}
 
-		// Attempt recovery: fetch + rebase then retry
-		if _, fErr := GitCommand(repoConfig, []string{"fetch", bi.UpstreamRemote}); fErr != nil {
-			// If fetch fails, break early
+		if err := s.fetch(); err != nil {
 			return tracerr.Wrap(err)
 		}
-		_, _ = GitCommand(repoConfig, []string{"rebase", bi.UpstreamRemote + "/" + bi.UpstreamBranch})
+		if err := s.rebase(); err != nil {
+			return err
+		}
+		if s.ahead == 0 {
+			return nil
+		}
 
-		// Backoff a little before retry
-		time.Sleep(time.Duration(i) * 300 * time.Millisecond)
+		if !sleepCtx(s.ctx, time.Duration(i)*300*time.Millisecond) {
+			return tracerr.Wrap(s.ctx.Err())
+		}
 	}
-	return nil
+}
+
+func isRetryablePush(err error) bool {
+	var gerr *GitError
+	if !errors.As(err, &gerr) || gerr.TimedOut {
+		return false
+	}
+	if ClassifyError(err) != CodePushRejected && ClassifyError(err) != CodeLock {
+		return false
+	}
+	s := gerr.Stderr
+	return strings.Contains(s, "[rejected]") ||
+		strings.Contains(s, "non-fast-forward") ||
+		strings.Contains(s, "fetch first") ||
+		strings.Contains(s, "cannot lock ref")
 }

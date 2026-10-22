@@ -1,0 +1,44 @@
+{
+ "events": [
+  {
+   "daemon": "running",
+   "repos": [],
+   "type": "hello"
+  },
+  {
+   "error": "unknown command"
+  }
+ ],
+ "status": [
+  {
+   "daemon": "running",
+   "repos": [],
+   "type": "hello"
+  },
+  {
+   "daemon": "running",
+   "repos": [],
+   "type": "status"
+  }
+ ],
+ "subscribe": [
+  {
+   "daemon": "running",
+   "repos": [],
+   "type": "hello"
+  },
+  {
+   "error": "unknown command"
+  }
+ ],
+ "sync_now": [
+  {
+   "daemon": "running",
+   "repos": [],
+   "type": "hello"
+  },
+  {
+   "status": "not_watching"
+  }
+ ]
+}

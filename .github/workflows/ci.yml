@@ -4,37 +4,63 @@ on:
   pull_request:
   workflow_dispatch:
   push:
-      branches:
-        - "master"
+    branches:
+      - "main"
+
+permissions:
+  contents: read
 
 jobs:
   test:
-    name: Test
-    runs-on: ubuntu-20.04
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     env:
-      CGO_ENABLED: 0
       EMAIL: test@example.com
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions/setup-go@v2
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: 1.18
+          go-version-file: go.mod
       - name: Setup Git Identity
         run: |
           git config --global user.email "test@example.com"
           git config --global user.name "GitHub CI"
-      - run: go test ./...
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: Cross-compile
+        run: |
+          GOOS=linux go build ./...
+          GOOS=windows go build ./...
+      - name: Fuzz the socket protocol
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          go test ./common -run '^$' -fuzz '^FuzzReadLine$' -fuzztime 10s
+          go test ./common -run '^$' -fuzz '^FuzzDecodeAndDispatch$' -fuzztime 10s
+          go test ./daemon -run '^$' -fuzz '^FuzzHandleCommand$' -fuzztime 10s
 
   lint:
     name: Lint
-    runs-on: ubuntu-20.04
-    env:
-      CGO_ENABLED: 0
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions/setup-go@v2
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: 1.18
-      - uses: golangci/golangci-lint-action@v2
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v8
         with:
-          version: v1.46.1
+          version: v2.15
+
+  app:
+    name: macOS app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build menu bar app
+        working-directory: macos/GitAutoSyncMenuBar
+        run: swift build -c release

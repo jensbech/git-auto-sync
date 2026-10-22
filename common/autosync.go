@@ -1,129 +1,382 @@
 package common
 
 import (
+	"context"
 	"errors"
-	"strconv"
+	"fmt"
 	"strings"
 
 	"github.com/gen2brain/beeep"
 	"github.com/ztrue/tracerr"
 )
 
+type syncRun struct {
+	ctx       context.Context
+	cfg       RepoConfig
+	prev      RepoState
+	info      repoInfo
+	committed bool
+	pulled    int
+	pushed    int
+	dropped   int
+	ahead     int
+	behind    int
+	counted   bool
+	guarded   bool
+	forced    bool
+}
+
 func AutoSync(repoConfig RepoConfig) error {
+	return AutoSyncCtx(context.Background(), repoConfig)
+}
+
+func AutoSyncCtx(ctx context.Context, repoConfig RepoConfig) error {
+	var prev RepoState
 	if repoConfig.State != nil {
 		repoConfig.State.Ensure(repoConfig.RepoPath)
+		prev, _ = repoConfig.State.Get(repoConfig.RepoPath)
 	}
 
-	if err := Preflight(repoConfig); err != nil {
-		code := preflightCode(err)
-		emitPreflight(repoConfig, err.Error(), code)
-		if repoConfig.State != nil {
-			repoConfig.State.MarkPreflight(repoConfig.RepoPath, err.Error())
+	s := &syncRun{ctx: ctx, cfg: repoConfig, prev: prev}
+	stage, err := s.prepare()
+	if repoConfig.LocalOnly {
+		return s.runLocal(err)
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return tracerr.Wrap(err)
 		}
-		return tracerr.Wrap(err)
+		if code := preflightCode(err); code != "" {
+			s.markPreflight(err.Error(), code)
+			return tracerr.Wrap(err)
+		}
+		return s.fail(stage, err)
 	}
 
-	refreshBranchInfo(repoConfig)
+	ensureRemoteFacts(ctx, repoConfig, s.info.CommonDir)
 
 	if repoConfig.State != nil {
 		repoConfig.State.MarkSyncing(repoConfig.RepoPath)
 	}
 
-	var err error
-	err = ensureGitAuthor(repoConfig)
+	stage, err = s.run()
 	if err != nil {
-		emitError(repoConfig, "author setup failed: "+err.Error())
-		if repoConfig.State != nil {
-			repoConfig.State.MarkError(repoConfig.RepoPath, err.Error())
+		if ctx.Err() != nil {
+			s.restoreStatus()
+			return tracerr.Wrap(err)
 		}
+		return s.fail(stage, err)
+	}
+	if s.guarded {
+		return s.stayInConflict()
+	}
+	return s.succeed()
+}
+
+func (s *syncRun) prepare() (string, error) {
+	info, err := preflight(s.ctx, s.cfg)
+	s.info = info
+	if preflightCode(err) != preflightNoHead || !upstreamConfigured(s.ctx, s.cfg, info.Branch) {
+		return "preflight", err
+	}
+	if cerr := s.commit(); cerr != nil {
+		return "commit", cerr
+	}
+	if !s.committed {
+		return "preflight", err
+	}
+	info, err = preflight(s.ctx, s.cfg)
+	s.info = info
+	return "preflight", err
+}
+
+func (s *syncRun) runLocal(err error) error {
+	if err == nil {
+		err = s.commit()
+	}
+	if s.ctx.Err() == nil {
+		s.finish()
+	}
+	if err != nil {
 		return tracerr.Wrap(err)
 	}
-
-	err = commit(repoConfig)
-	if err != nil {
-		emitError(repoConfig, "commit failed: "+err.Error())
-		if repoConfig.State != nil {
-			repoConfig.State.MarkError(repoConfig.RepoPath, err.Error())
-		}
-		return tracerr.Wrap(err)
-	}
-
-	err = fetch(repoConfig)
-	if err != nil {
-		emitError(repoConfig, "fetch failed: "+err.Error())
-		if repoConfig.State != nil {
-			repoConfig.State.MarkError(repoConfig.RepoPath, err.Error())
-		}
-		return tracerr.Wrap(err)
-	}
-
-	err = rebase(repoConfig)
-	if err != nil {
-		if errors.Is(err, errRebaseFailed) {
-			files := readConflictFiles(repoConfig)
-			logConflict(repoConfig, files)
-			emitConflict(repoConfig, files)
-			if repoConfig.State != nil {
-				repoConfig.State.MarkConflict(repoConfig.RepoPath, files, "rebase conflict")
-			}
-			notifyIfNoClients(repoConfig, "Git Auto Sync - Conflict", "Could not rebase for - "+repoConfig.RepoPath)
-		} else {
-			emitError(repoConfig, "rebase failed: "+err.Error())
-			if repoConfig.State != nil {
-				repoConfig.State.MarkError(repoConfig.RepoPath, err.Error())
-			}
-		}
-		return tracerr.Wrap(err)
-	}
-
-	err = push(repoConfig)
-	if err != nil {
-		emitError(repoConfig, "push failed: "+err.Error())
-		if repoConfig.State != nil {
-			repoConfig.State.MarkError(repoConfig.RepoPath, err.Error())
-		}
-		return tracerr.Wrap(err)
-	}
-
-	emitEvent(repoConfig, NewEvent("synced", repoConfig.RepoPath, "", "ok"))
-	if repoConfig.State != nil {
-		repoConfig.State.MarkSuccess(repoConfig.RepoPath, "synced")
-	}
-	refreshBranchInfo(repoConfig)
 	return nil
 }
 
-func refreshBranchInfo(cfg RepoConfig) {
-	if cfg.State == nil {
-		return
-	}
-	bi, err := fetchBranchInfo(cfg.RepoPath)
-	if err != nil {
-		return
-	}
-	upstream := ""
-	if bi.UpstreamRemote != "" && bi.UpstreamBranch != "" {
-		upstream = bi.UpstreamRemote + "/" + bi.UpstreamBranch
-	}
-	ahead, behind := readAheadBehind(cfg, upstream)
-	cfg.State.SetBranchInfo(cfg.RepoPath, bi.CurrentBranch, upstream, ahead, behind)
+func (s *syncRun) fetch() error {
+	forced, err := fetch(s.ctx, s.cfg, s.info)
+	s.forced = s.forced || forced
+	return err
 }
 
-func readAheadBehind(cfg RepoConfig, upstream string) (int, int) {
-	if upstream == "" {
-		return 0, 0
+func (s *syncRun) run() (string, error) {
+	if err := s.commit(); err != nil {
+		return "commit", err
 	}
-	out, err := GitCommand(cfg, []string{"rev-list", "--left-right", "--count", "HEAD..." + upstream})
+	if err := s.fetch(); err != nil {
+		return "fetch", err
+	}
+	if s.conflictUnchanged() {
+		s.guarded = true
+		return "", nil
+	}
+	if err := s.rebase(); err != nil {
+		return "rebase", err
+	}
+	if s.ahead > 0 {
+		if err := s.push(); err != nil {
+			return "push", err
+		}
+		s.pushed = s.ahead
+		s.ahead = 0
+	}
+	return "", nil
+}
+
+func (s *syncRun) commit() error {
+	committed, err := commit(s.ctx, s.cfg)
+	if committed {
+		s.committed = true
+	}
+	return err
+}
+
+func (s *syncRun) count() error {
+	ahead, behind, err := aheadBehind(s.ctx, s.cfg, s.info)
 	if err != nil {
-		return 0, 0
+		s.counted = false
+		return err
 	}
-	parts := strings.Fields(strings.TrimSpace(out.String()))
-	if len(parts) != 2 {
-		return 0, 0
+	s.ahead, s.behind, s.counted = ahead, behind, true
+	return nil
+}
+
+func (s *syncRun) rebase() error {
+	if err := s.count(); err != nil {
+		return err
 	}
-	ahead, _ := strconv.Atoi(parts[0])
-	behind, _ := strconv.Atoi(parts[1])
-	return ahead, behind
+	if s.behind == 0 && !s.forced {
+		return nil
+	}
+	ahead, behind, forkPoint := s.ahead, s.behind, s.forced
+
+	err := rebase(s.ctx, s.cfg, s.info, forkPoint)
+	if errors.Is(err, errDirtyWorktree) {
+		if err := s.commit(); err != nil {
+			return err
+		}
+		err = rebase(s.ctx, s.cfg, s.info, forkPoint)
+	}
+	if err != nil {
+		return err
+	}
+	s.forced = false
+	s.pulled += behind
+	if err := s.count(); err != nil {
+		return err
+	}
+	if forkPoint && s.ahead < ahead {
+		s.dropped += ahead - s.ahead
+	}
+	return nil
+}
+
+func (s *syncRun) conflictUnchanged() bool {
+	p := s.prev
+	if s.cfg.Force || !p.Conflict || p.ConflictHead == "" || p.ConflictUp == "" {
+		return false
+	}
+	up, err := revParse(s.ctx, s.cfg, s.info.Upstream)
+	if err != nil || up != p.ConflictUp {
+		return false
+	}
+	if !isAncestor(s.ctx, s.cfg, p.ConflictHead, "HEAD") {
+		return false
+	}
+	return !isAncestor(s.ctx, s.cfg, up, "HEAD")
+}
+
+func (s *syncRun) changed() bool {
+	return s.committed || s.pulled > 0 || s.pushed > 0 || s.dropped > 0
+}
+
+func (s *syncRun) activity() string {
+	var parts []string
+	if s.committed {
+		parts = append(parts, "committed")
+	}
+	if s.pulled > 0 {
+		parts = append(parts, fmt.Sprintf("pulled %d", s.pulled))
+	}
+	if s.dropped > 0 {
+		parts = append(parts, fmt.Sprintf("dropped %d rewritten upstream", s.dropped))
+	}
+	if s.pushed > 0 {
+		parts = append(parts, fmt.Sprintf("pushed %d", s.pushed))
+	}
+	if len(parts) == 0 {
+		return "up to date"
+	}
+	return strings.Join(parts, ", ")
+}
+
+func (s *syncRun) succeed() error {
+	path := s.cfg.RepoPath
+	activity := s.activity()
+	if s.cfg.State != nil {
+		s.cfg.State.MarkSuccess(path, activity)
+	}
+
+	upstream := s.info.UpstreamShort
+	if s.pulled > 0 {
+		emitEvent(s.cfg, NewEvent(EventPull, path, fmt.Sprintf("pulled %d commit(s) from %s", s.pulled, upstream), ""))
+	}
+	if s.dropped > 0 {
+		emitEvent(s.cfg, NewEvent(EventPull, path, fmt.Sprintf("%s was force-pushed; dropped %d local commit(s) that were removed upstream", upstream, s.dropped), ""))
+	}
+	if s.pushed > 0 {
+		emitEvent(s.cfg, NewEvent(EventPush, path, fmt.Sprintf("pushed %d commit(s) to %s", s.pushed, upstream), ""))
+	}
+	if isUnhealthy(s.prev.Status) {
+		emitEvent(s.cfg, NewEvent(EventRecovered, path, "recovered from "+s.prev.Status, StatusOK))
+	}
+	if s.changed() {
+		emitEvent(s.cfg, NewEvent(EventSynced, path, activity, StatusOK))
+	}
+
+	s.finish()
+	return nil
+}
+
+func isUnhealthy(status string) bool {
+	switch status {
+	case StatusError, StatusOffline, StatusConflict, StatusPreflight:
+		return true
+	}
+	return false
+}
+
+func (s *syncRun) stayInConflict() error {
+	if s.cfg.State != nil {
+		msg := s.prev.LastError
+		if msg == "" {
+			msg = "rebase conflict"
+		}
+		s.cfg.State.MarkConflict(s.cfg.RepoPath, s.prev.ConflictFiles, msg)
+	}
+	s.finish()
+	return nil
+}
+
+func (s *syncRun) fail(stage string, err error) error {
+	path := s.cfg.RepoPath
+
+	var conflict *rebaseConflictError
+	if errors.As(err, &conflict) {
+		s.handleConflict(conflict)
+		s.finish()
+		return tracerr.Wrap(err)
+	}
+	if code := preflightCode(err); code != "" {
+		s.markPreflight(err.Error(), code)
+		s.finish()
+		return tracerr.Wrap(err)
+	}
+
+	code := ClassifyError(err)
+	msg := errorMessage(stage, err)
+
+	switch {
+	case code == CodeNetwork || (code == CodeTimeout && isNetworkTimeout(err)):
+		if s.cfg.State != nil {
+			s.cfg.State.MarkOffline(path, msg, 0)
+			if code != CodeNetwork {
+				s.cfg.State.Update(path, func(st *RepoState) { st.ErrorCode = code })
+			}
+		}
+		if s.prev.Status != StatusOffline {
+			emitEvent(s.cfg, NewCodedEvent(EventOffline, path, msg, code))
+		}
+	default:
+		if s.cfg.State != nil {
+			s.cfg.State.MarkErrorCode(path, code, msg)
+		}
+		if s.prev.Status != StatusError || s.prev.ErrorCode != code || s.prev.LastError != msg {
+			emitEvent(s.cfg, NewCodedEvent(EventError, path, msg, code))
+		}
+	}
+
+	s.finish()
+	return tracerr.Wrap(err)
+}
+
+func (s *syncRun) handleConflict(c *rebaseConflictError) {
+	path := s.cfg.RepoPath
+	isNew := !s.prev.Conflict || !equalStrings(s.prev.ConflictFiles, c.Files) || s.cfg.Force
+
+	if s.cfg.State != nil {
+		s.cfg.State.SetConflictRefs(path, c.Head, c.Upstream)
+		s.cfg.State.MarkConflict(path, c.Files, "rebase conflict")
+	}
+	if isNew {
+		logConflict(s.info.GitDir, c.Files)
+		emitConflict(s.cfg, c.Files)
+	}
+	if !s.prev.Conflict {
+		notifyIfNoClients(s.cfg, "Git Auto Sync - Conflict", "Could not rebase for - "+path)
+	}
+}
+
+func (s *syncRun) markPreflight(msg, code string) {
+	path := s.cfg.RepoPath
+	if s.prev.Status != StatusPreflight || s.prev.Preflight != msg {
+		emitEvent(s.cfg, NewCodedEvent(EventPreflight, path, msg, code))
+	}
+	if s.cfg.State != nil {
+		s.cfg.State.MarkPreflight(path, msg)
+		s.cfg.State.Update(path, func(st *RepoState) { st.ErrorCode = code })
+	}
+}
+
+func (s *syncRun) restoreStatus() {
+	if s.cfg.State == nil {
+		return
+	}
+	prevStatus := s.prev.Status
+	s.cfg.State.Update(s.cfg.RepoPath, func(st *RepoState) {
+		if st.Status == StatusSyncing {
+			st.Status = prevStatus
+		}
+	})
+}
+
+func (s *syncRun) finish() {
+	if s.cfg.State == nil {
+		return
+	}
+	path := s.cfg.RepoPath
+	s.cfg.State.MarkChecked(path, s.changed())
+	if s.info.Branch == "" {
+		return
+	}
+	if !s.counted || s.guarded {
+		if err := s.count(); err != nil {
+			s.ahead, s.behind = 0, 0
+		}
+	}
+	s.cfg.State.SetBranchInfo(path, s.info.Branch, s.info.UpstreamShort, s.ahead, s.behind)
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func emitEvent(cfg RepoConfig, ev Event) {
@@ -132,20 +385,12 @@ func emitEvent(cfg RepoConfig, ev Event) {
 	}
 }
 
-func emitError(cfg RepoConfig, msg string) {
-	emitEvent(cfg, NewEvent("error", cfg.RepoPath, msg, ""))
-}
-
-func emitPreflight(cfg RepoConfig, msg, code string) {
-	emitEvent(cfg, NewEvent("preflight", cfg.RepoPath, msg, code))
-}
-
 func emitConflict(cfg RepoConfig, files []string) {
 	msg := "rebase conflict"
 	if len(files) > 0 {
 		msg = "rebase conflict: " + strings.Join(files, ", ")
 	}
-	emitEvent(cfg, NewEvent("conflict", cfg.RepoPath, msg, ""))
+	emitEvent(cfg, NewCodedEvent(EventConflict, cfg.RepoPath, msg, CodeConflict))
 }
 
 func notifyIfNoClients(cfg RepoConfig, title, message string) {

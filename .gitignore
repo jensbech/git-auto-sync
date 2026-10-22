@@ -1,3 +1,10 @@
-git-auto-sync
+/git-auto-sync
+/daemon/git-auto-sync-daemon
 
 dist/
+.build/
+.swiftpm/
+.playwright-mcp/
+.DS_Store
+/~/
+.claude/worktrees/

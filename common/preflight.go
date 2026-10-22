@@ -1,12 +1,16 @@
 package common
 
 import (
+	"context"
 	"errors"
-	"os"
 	"path/filepath"
+)
 
-	git "gopkg.in/src-d/go-git.v4"
-	"gopkg.in/src-d/go-git.v4/plumbing"
+const (
+	preflightRepoMissing   = "repo_missing"
+	preflightNoHead        = "no_head"
+	preflightUpstreamGone  = "upstream_gone"
+	preflightUntrustedRepo = "untrusted_repo"
 )
 
 type PreflightError struct {
@@ -29,44 +33,57 @@ func newPreflight(code, msg string) error {
 }
 
 func Preflight(cfg RepoConfig) error {
-	repoPath := cfg.RepoPath
+	_, err := preflight(context.Background(), cfg)
+	return err
+}
 
-	if _, err := os.Stat(filepath.Join(repoPath, ".git")); err != nil {
-		return newPreflight("missing_git", "not a git repo (no .git directory)")
+func isEnvironmentError(err error) bool {
+	switch ClassifyError(err) {
+	case CodeXcodeLicense, CodeGitMissing, CodeTimeout:
+		return true
 	}
+	return false
+}
 
-	if rebasing, _ := isRebasing(repoPath); rebasing {
-		return newPreflight("rebase_in_progress", "rebase in progress — resolve or abort manually")
-	}
-
-	if _, err := os.Stat(filepath.Join(repoPath, ".git", "MERGE_HEAD")); err == nil {
-		return newPreflight("merge_in_progress", "merge in progress — resolve or abort manually")
-	}
-
-	repo, err := git.PlainOpenWithOptions(repoPath, &git.PlainOpenOptions{DetectDotGit: true})
+func preflight(ctx context.Context, cfg RepoConfig) (repoInfo, error) {
+	info, headRef, err := locateRepo(ctx, cfg)
 	if err != nil {
-		return newPreflight("open_failed", "cannot open repository: "+err.Error())
+		if isEnvironmentError(err) || ctx.Err() != nil {
+			return repoInfo{}, err
+		}
+		switch {
+		case ClassifyError(err) == CodeNotARepo:
+			return repoInfo{}, newPreflight(preflightRepoMissing, "repository folder is missing")
+		case isUntrustedRepo(err):
+			return repoInfo{}, newPreflight(preflightUntrustedRepo, errorMessage("", err))
+		}
+		return repoInfo{}, newPreflight("missing_git", "not a git repository (no .git folder found)")
 	}
 
-	ref, err := repo.Reference(plumbing.HEAD, false)
-	if err != nil {
-		return newPreflight("no_head", "no HEAD reference")
+	if rebasing, _ := isRebasing(info.GitDir); rebasing {
+		return info, newPreflight("rebase_in_progress", "rebase in progress — resolve or abort manually")
 	}
 
-	if ref.Type() == plumbing.HashReference {
-		return newPreflight("detached_head", "detached HEAD — not on a branch")
+	if ok, _ := exists(filepath.Join(info.GitDir, "MERGE_HEAD")); ok {
+		return info, newPreflight("merge_in_progress", "merge in progress — resolve or abort manually")
 	}
 
-	config, err := repo.Config()
-	if err != nil {
-		return newPreflight("config_failed", "cannot read git config: "+err.Error())
+	info, err = readBranchInfo(ctx, cfg, info, headRef)
+	switch {
+	case errors.Is(err, errDetachedHead):
+		return info, newPreflight("detached_head", "detached HEAD — not on a branch")
+	case errors.Is(err, errUnbornBranch):
+		return info, newPreflight(preflightNoHead, "branch '"+info.Branch+"' has no commits yet; make the first commit and push it with `git push -u`")
+	case err != nil:
+		if isEnvironmentError(err) || ctx.Err() != nil {
+			return info, err
+		}
+		return info, newPreflight("open_failed", "cannot open repository: "+errorSummary(err))
 	}
 
-	branchName := ref.Target().Short()
-	branchConfig := config.Branches[branchName]
-	if branchConfig == nil || branchConfig.Remote == "" || branchConfig.Merge == "" {
-		return newPreflight("no_upstream", "branch '"+branchName+"' has no upstream tracking branch")
+	if !info.hasUpstream() {
+		return info, newPreflight("no_upstream", "branch '"+info.Branch+"' has no upstream tracking branch")
 	}
 
-	return nil
+	return info, nil
 }

@@ -1,30 +1,36 @@
 package common
 
 import (
+	"context"
+	"errors"
+	"strings"
+
 	"github.com/ztrue/tracerr"
-	git "gopkg.in/src-d/go-git.v4"
 )
 
-func fetch(repoConfig RepoConfig) error {
-	repoPath := repoConfig.RepoPath
-	r, err := git.PlainOpenWithOptions(repoPath, &git.PlainOpenOptions{DetectDotGit: true})
-	if err != nil {
-		return tracerr.Wrap(err)
+func fetch(ctx context.Context, repoConfig RepoConfig, info repoInfo) (bool, error) {
+	if info.Remote == "" || info.Remote == "." {
+		return false, nil
 	}
 
-	remotes, err := r.Remotes()
-	if err != nil {
-		return tracerr.Wrap(err)
+	args := []string{"fetch", info.Remote}
+	if info.MergeRef != "" && strings.HasPrefix(info.Upstream, "refs/remotes/") {
+		args = append(args, "+"+info.MergeRef+":"+info.Upstream)
 	}
-
-	for _, remote := range remotes {
-		remoteName := remote.Config().Name
-
-		_, err := GitCommand(repoConfig, []string{"fetch", remoteName})
-		if err != nil {
-			return tracerr.Wrap(err)
+	stderr, err := gitCommandStderr(ctx, repoConfig, args)
+	if err != nil {
+		if isMissingRemoteRef(err) {
+			if _, perr := revParse(ctx, repoConfig, info.Upstream); perr == nil {
+				return false, upstreamGoneError(info)
+			}
+			return false, nil
 		}
+		return false, tracerr.Wrap(err)
 	}
+	return strings.Contains(stderr, "(forced update)"), nil
+}
 
-	return nil
+func isMissingRemoteRef(err error) bool {
+	var gerr *GitError
+	return errors.As(err, &gerr) && strings.Contains(gerr.Stderr, "couldn't find remote ref")
 }

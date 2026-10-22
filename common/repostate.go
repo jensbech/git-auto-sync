@@ -13,6 +13,7 @@ const (
 	StatusConflict  = "conflict"
 	StatusPreflight = "preflight"
 	StatusPaused    = "paused"
+	StatusOffline   = "offline"
 )
 
 type RepoState struct {
@@ -34,12 +35,22 @@ type RepoState struct {
 	BatchDueTs    int64    `json:"batchDueTs,omitempty"`
 	PollInterval  int      `json:"pollInterval,omitempty"`
 	BatchWindow   int      `json:"batchWindow,omitempty"`
+	ErrorCode     string   `json:"errorCode,omitempty"`
+	LastChangeTs  int64    `json:"lastChangeTs,omitempty"`
+	LastCheckTs   int64    `json:"lastCheckTs,omitempty"`
+	NextRetryTs   int64    `json:"nextRetryTs,omitempty"`
+	Failures      int      `json:"failures"`
+	ConflictHead  string   `json:"conflictHead,omitempty"`
+	ConflictUp    string   `json:"conflictUpstream,omitempty"`
+	Seq           uint64   `json:"seq"`
 }
 
 type RepoStateStore struct {
+	notifyMu  sync.Mutex
 	mu        sync.RWMutex
 	states    map[string]*RepoState
 	listeners []func(RepoState)
+	seq       uint64
 }
 
 func NewRepoStateStore() *RepoStateStore {
@@ -67,6 +78,8 @@ func (s *RepoStateStore) Remove(path string) {
 }
 
 func (s *RepoStateStore) Update(path string, fn func(*RepoState)) RepoState {
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
 	s.mu.Lock()
 	st, ok := s.states[path]
 	if !ok {
@@ -74,6 +87,8 @@ func (s *RepoStateStore) Update(path string, fn func(*RepoState)) RepoState {
 		s.states[path] = st
 	}
 	fn(st)
+	s.seq++
+	st.Seq = s.seq
 	snap := *st
 	listeners := append([]func(RepoState){}, s.listeners...)
 	s.mu.Unlock()
@@ -119,16 +134,56 @@ func (s *RepoStateStore) MarkSuccess(path string, activity string) {
 		st.LastActivity = activity
 		st.LastSyncTs = time.Now().Unix()
 		st.LastError = ""
+		st.ErrorCode = ""
 		st.Preflight = ""
 		st.Conflict = false
 		st.ConflictFiles = nil
+		st.ConflictHead = ""
+		st.ConflictUp = ""
+		st.NextRetryTs = 0
+		st.Failures = 0
 	})
 }
 
 func (s *RepoStateStore) MarkError(path string, msg string) {
+	s.MarkErrorCode(path, CodeUnknown, msg)
+}
+
+func (s *RepoStateStore) MarkErrorCode(path, code, msg string) {
 	s.Update(path, func(st *RepoState) {
 		st.Status = StatusError
 		st.LastError = msg
+		st.ErrorCode = code
+		st.Preflight = ""
+		st.Failures++
+	})
+}
+
+func (s *RepoStateStore) MarkOffline(path, msg string, nextRetry int64) {
+	s.Update(path, func(st *RepoState) {
+		st.Status = StatusOffline
+		st.LastError = msg
+		st.ErrorCode = CodeNetwork
+		st.Preflight = ""
+		st.NextRetryTs = nextRetry
+		st.Failures++
+	})
+}
+
+func (s *RepoStateStore) MarkChecked(path string, changed bool) {
+	s.Update(path, func(st *RepoState) {
+		now := time.Now().Unix()
+		st.LastCheckTs = now
+		if changed {
+			st.LastChangeTs = now
+		}
+	})
+}
+
+func (s *RepoStateStore) SetConflictRefs(path, head, upstream string) {
+	s.Update(path, func(st *RepoState) {
+		st.ConflictHead = head
+		st.ConflictUp = upstream
 	})
 }
 
@@ -138,6 +193,8 @@ func (s *RepoStateStore) MarkConflict(path string, files []string, msg string) {
 		st.Conflict = true
 		st.ConflictFiles = files
 		st.LastError = msg
+		st.ErrorCode = CodeConflict
+		st.Preflight = ""
 	})
 }
 
@@ -148,8 +205,50 @@ func (s *RepoStateStore) MarkPreflight(path string, reason string) {
 	})
 }
 
-func (s *RepoStateStore) SetWatching(path string, watching bool) {
+func (s *RepoStateStore) MarkRepoMissing(path, msg string) bool {
+	changed := false
 	s.Update(path, func(st *RepoState) {
+		changed = st.Status != StatusPreflight || st.ErrorCode != CodeRepoMissing || st.Preflight != msg
+		st.Status = StatusPreflight
+		st.Preflight = msg
+		st.LastError = msg
+		st.ErrorCode = CodeRepoMissing
+		st.NextRetryTs = 0
+		st.BatchPending = false
+		st.BatchDueTs = 0
+	})
+	return changed
+}
+
+func (s *RepoStateStore) ClearRepoMissing(path string) bool {
+	cleared := false
+	s.UpdateExisting(path, func(st *RepoState) {
+		if st.ErrorCode != CodeRepoMissing {
+			return
+		}
+		cleared = true
+		st.Preflight = ""
+		st.LastError = ""
+		st.ErrorCode = ""
+		if st.Paused {
+			st.Status = StatusPaused
+		} else {
+			st.Status = StatusIdle
+		}
+	})
+	return cleared
+}
+
+func (s *RepoStateStore) MarkPreflightCode(path, code, reason string) {
+	s.Update(path, func(st *RepoState) {
+		st.Status = StatusPreflight
+		st.Preflight = reason
+		st.ErrorCode = code
+	})
+}
+
+func (s *RepoStateStore) SetWatching(path string, watching bool) {
+	s.UpdateExisting(path, func(st *RepoState) {
 		st.Watching = watching
 	})
 }
@@ -186,4 +285,46 @@ func (s *RepoStateStore) SetSettings(path string, pollSec, batchSec int) {
 		st.PollInterval = pollSec
 		st.BatchWindow = batchSec
 	})
+}
+
+func (s *RepoStateStore) SetNextRetry(path string, ts int64) {
+	s.Update(path, func(st *RepoState) {
+		st.NextRetryTs = ts
+	})
+}
+
+func (s *RepoStateStore) ClearPreflight(path string) {
+	s.Update(path, func(st *RepoState) {
+		st.Preflight = ""
+		if st.Status == StatusPreflight {
+			st.ErrorCode = ""
+			if st.Paused {
+				st.Status = StatusPaused
+			} else {
+				st.Status = StatusIdle
+			}
+		}
+	})
+}
+
+func (s *RepoStateStore) UpdateExisting(path string, fn func(*RepoState)) bool {
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+	s.mu.Lock()
+	st, ok := s.states[path]
+	if !ok {
+		s.mu.Unlock()
+		return false
+	}
+	fn(st)
+	s.seq++
+	st.Seq = s.seq
+	snap := *st
+	listeners := append([]func(RepoState){}, s.listeners...)
+	s.mu.Unlock()
+
+	for _, l := range listeners {
+		l(snap)
+	}
+	return true
 }

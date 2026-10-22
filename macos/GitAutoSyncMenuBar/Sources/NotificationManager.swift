@@ -2,65 +2,75 @@ import AppKit
 import Foundation
 import UserNotifications
 
-final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
+@MainActor
+protocol RepoNotifying: AnyObject {
+    func notify(repo: String, body: String)
+    func clear(repo: String)
+}
+
+@MainActor
+final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, RepoNotifying {
     static let shared = NotificationManager()
 
-    private var lastNotificationTime: [String: Date] = [:]
-    private let debounceInterval: TimeInterval = 60
+    nonisolated static let repoKey = "repo"
+
+    var onOpenRepo: ((String) -> Void)?
+
+    private let center: UNUserNotificationCenter?
 
     private override init() {
+        center = Bundle.main.bundleIdentifier == nil ? nil : UNUserNotificationCenter.current()
         super.init()
-        UNUserNotificationCenter.current().delegate = self
+        center?.delegate = self
     }
 
     func requestPermission() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        center?.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    func sendNotification(repo: String, message: String) {
-        if let last = lastNotificationTime[repo],
-           Date().timeIntervalSince(last) < debounceInterval {
-            return
-        }
-        lastNotificationTime[repo] = Date()
-
+    func notify(repo: String, body: String) {
+        guard let center else { return }
         let content = UNMutableNotificationContent()
-        content.title = "git-auto-sync Error"
-        content.body = "\(abbreviatePath(repo)): \(message)"
+        content.title = "Git Auto Sync"
+        content.subtitle = URL(fileURLWithPath: repo).lastPathComponent
+        content.body = body
         content.sound = .default
-        content.categoryIdentifier = "SYNC_ERROR"
+        content.threadIdentifier = repo
+        content.userInfo = [Self.repoKey: repo]
 
         let request = UNNotificationRequest(
-            identifier: "error-\(repo)-\(Date().timeIntervalSince1970)",
+            identifier: "gas-\(repo)",
             content: content,
             trigger: nil
         )
-
-        UNUserNotificationCenter.current().add(request)
+        center.add(request)
     }
 
-    func userNotificationCenter(
+    func clear(repo: String) {
+        center?.removeDeliveredNotifications(withIdentifiers: ["gas-\(repo)"])
+    }
+
+    nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        NSApplication.shared.activate(ignoringOtherApps: true)
+        let repo = response.notification.request.content.userInfo[Self.repoKey] as? String
+        Task { @MainActor in
+            if let repo {
+                self.onOpenRepo?(repo)
+            } else {
+                NSApplication.shared.activate()
+            }
+        }
         completionHandler()
     }
 
-    func userNotificationCenter(
+    nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
         completionHandler([.banner, .sound])
-    }
-
-    private func abbreviatePath(_ path: String) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        if path.hasPrefix(home) {
-            return "~" + path.dropFirst(home.count)
-        }
-        return path
     }
 }

@@ -2,32 +2,27 @@ package common
 
 import (
 	"errors"
-	"os/exec"
-
-	"github.com/ztrue/tracerr"
+	"strings"
 )
 
-var errNoGitAuthorEmail = errors.New("Missing git author email")
-var errNoGitAuthorName = errors.New("Missing git author name")
+var errNoGitAuthorEmail = errors.New("git user.email is not set; run `git config --global user.email you@example.com`")
+var errNoGitAuthorName = errors.New("git user.name is not set; run `git config --global user.name \"Your Name\"`")
 
-func ensureGitAuthor(repoConfig RepoConfig) error {
-	_, err := GitCommand(repoConfig, []string{"config", "user.email"})
-	if err != nil {
-		var exerr *exec.ExitError
-		if errors.As(err, &exerr) && exerr.ExitCode() == 1 {
-			return errNoGitAuthorEmail
-		}
-		return tracerr.Wrap(err)
+func authorError(err error) error {
+	var gerr *GitError
+	if !errors.As(err, &gerr) {
+		return nil
 	}
-
-	_, err = GitCommand(repoConfig, []string{"config", "user.name"})
-	if err != nil {
-		var exerr *exec.ExitError
-		if errors.As(err, &exerr) && exerr.ExitCode() == 1 {
-			return errNoGitAuthorName
-		}
-		return tracerr.Wrap(err)
+	s := strings.ToLower(gerr.Stderr)
+	switch {
+	case strings.Contains(s, "no email was given"),
+		strings.Contains(s, "unable to auto-detect email"),
+		strings.Contains(s, "empty ident email"):
+		return errNoGitAuthorEmail
+	case strings.Contains(s, "no name was given"),
+		strings.Contains(s, "empty ident name"),
+		strings.Contains(s, "name consists only of disallowed characters"):
+		return errNoGitAuthorName
 	}
-
 	return nil
 }

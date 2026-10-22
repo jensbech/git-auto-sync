@@ -2,7 +2,7 @@ package common
 
 import (
 	"bytes"
-	"io/ioutil"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,13 +14,12 @@ import (
 )
 
 func PrepareMultiFixtures(t *testing.T, name string, deps []string) RepoConfig {
-	newTestDataPath, err := ioutil.TempDir(os.TempDir(), "mutli_fixture")
-	assert.NilError(t, err)
+	newTestDataPath := t.TempDir()
 
 	for _, name := range deps {
 		fixturePath := filepath.Join("testdata", name)
 		newPath := filepath.Join(newTestDataPath, name)
-		err = cp.Copy(fixturePath, newPath)
+		err := cp.Copy(fixturePath, newPath)
 		assert.NilError(t, err)
 
 		err = os.Rename(filepath.Join(newPath, ".gitted"), filepath.Join(newPath, ".git"))
@@ -37,19 +36,31 @@ func FixFixtureGitConfig(t *testing.T, newRepoPath string, testDataPath string) 
 	// Fix remote paths
 	dotGitPath := filepath.Join(newRepoPath, ".git")
 	gitConfigFilePath := filepath.Join(dotGitPath, "config")
-	input, err := ioutil.ReadFile(gitConfigFilePath)
+	input, err := os.ReadFile(gitConfigFilePath)
 	assert.NilError(t, err)
 
-	output := bytes.Replace(input, []byte("$TESTDATA$"), []byte(testDataPath), -1)
+	output := bytes.ReplaceAll(input, []byte("$TESTDATA$"), []byte(testDataPath))
 
-	err = ioutil.WriteFile(gitConfigFilePath, output, 0666)
+	err = os.WriteFile(gitConfigFilePath, output, 0666)
 	assert.NilError(t, err)
 }
 
 func Test_SimpleFetch(t *testing.T) {
 	repoConfig := PrepareMultiFixtures(t, "simple_fetch", []string{"multiple_file_change"})
 
-	err := fetch(repoConfig)
+	ctx := context.Background()
+	_, err := GitCommand(repoConfig, []string{"config", "branch.master.remote", "origin1"})
+	assert.NilError(t, err)
+	_, err = GitCommand(repoConfig, []string{"config", "branch.master.merge", "refs/heads/master"})
+	assert.NilError(t, err)
+	_, err = GitCommand(repoConfig, []string{"remote", "add", "dead", "file:///nonexistent/dead-remote.git"})
+	assert.NilError(t, err)
+
+	info, err := readRepoInfo(ctx, repoConfig)
+	assert.NilError(t, err)
+	assert.Equal(t, info.Remote, "origin1")
+
+	_, err = fetch(ctx, repoConfig, info)
 	assert.NilError(t, err)
 
 	r, err := git.PlainOpen(repoConfig.RepoPath)

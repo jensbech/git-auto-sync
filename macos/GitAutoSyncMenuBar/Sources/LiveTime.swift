@@ -20,21 +20,31 @@ struct LiveRelativeText: View {
     }
 
     private func format(_ d: Date, now: Date) -> String {
-        let delta = now.timeIntervalSince(d)
-        if delta < 5 { return "just now" }
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = style
-        return f.localizedString(for: d, relativeTo: now)
+        RelativeTime.format(d, relativeTo: now, style: style)
     }
 }
 
 enum RelativeTime {
-    static func format(_ date: Date, style: RelativeDateTimeFormatter.UnitsStyle = .abbreviated) -> String {
-        let delta = -date.timeIntervalSinceNow
-        if delta < 5 { return "just now" }
+    private static let abbreviated = formatter(.abbreviated)
+    private static let full = formatter(.full)
+    private static let short = formatter(.short)
+
+    private static func formatter(_ style: RelativeDateTimeFormatter.UnitsStyle) -> RelativeDateTimeFormatter {
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = style
-        return f.localizedString(for: date, relativeTo: .now)
+        return f
+    }
+
+    static func format(_ date: Date, relativeTo now: Date = .now, style: RelativeDateTimeFormatter.UnitsStyle = .abbreviated) -> String {
+        let delta = now.timeIntervalSince(date)
+        if delta < 5 { return "just now" }
+        let f: RelativeDateTimeFormatter
+        switch style {
+        case .full: f = full
+        case .short: f = short
+        default: f = abbreviated
+        }
+        return f.localizedString(for: date, relativeTo: now)
     }
 }
 
@@ -50,5 +60,10 @@ enum ErrorClean {
         s = s.trimmingCharacters(in: .whitespacesAndNewlines)
         if s.count > 240 { s = String(s.prefix(240)) + "…" }
         return s
+    }
+
+    static func isSummary(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed.count <= 240 && !trimmed.contains("\n")
     }
 }
